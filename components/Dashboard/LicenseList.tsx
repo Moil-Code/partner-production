@@ -15,6 +15,8 @@ interface License {
   businessType?: string;
   messageId?: string | null;
   emailStatus?: string | null;
+  lastReminderSentAt?: string | null;
+  reminderCount?: number;
 }
 
 interface PaginationInfo {
@@ -115,6 +117,15 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
       day: 'numeric',
       year: 'numeric'
     });
+  };
+
+  const formatRelative = (dateString: string) => {
+    const days = Math.floor(
+      (Date.now() - new Date(dateString).getTime()) / (1000 * 60 * 60 * 24)
+    );
+    if (days <= 0) return 'today';
+    if (days === 1) return '1 day ago';
+    return `${days} days ago`;
   };
 
   const handleEditEmail = (license: License) => {
@@ -399,6 +410,7 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">Business</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">Status</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">Email Status</th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">Reminders</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">Date Added</th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">Activated</th>
                   <th className="px-6 py-4 text-right text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider">Actions</th>
@@ -499,6 +511,22 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
                         )}
                         {license.emailStatus || 'queued'}
                       </span>
+                    </td>
+                    <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">
+                      {license.isActivated ? (
+                        <span className="text-[var(--text-tertiary)]">-</span>
+                      ) : license.lastReminderSentAt ? (
+                        <div className="flex flex-col">
+                          <span className="font-medium text-[var(--text-primary)]">
+                            {license.reminderCount}/4 sent
+                          </span>
+                          <span className="text-xs text-[var(--text-tertiary)]" title={formatDate(license.lastReminderSentAt)}>
+                            Last: {formatRelative(license.lastReminderSentAt)}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-[var(--text-tertiary)] italic">Not yet</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">{formatDate(license.createdAt)}</td>
                     <td className="px-6 py-4 text-sm text-[var(--text-secondary)]">

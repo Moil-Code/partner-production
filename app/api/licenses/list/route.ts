@@ -150,6 +150,9 @@ export async function GET(request: NextRequest) {
         businessType: license.business_type,
         messageId: license.message_id,
         emailStatus: license.email_status,
+        activationEmailSentAt: license.activation_email_sent_at ?? null,
+        lastReminderSentAt: license.last_reminder_sent_at ?? null,
+        reminderCount: license.reminder_count ?? 0,
         addedBy: addedByAdmin ? {
           id: addedByAdmin.id,
           name: `${addedByAdmin.first_name} ${addedByAdmin.last_name}`.trim(),

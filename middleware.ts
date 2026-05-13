@@ -36,11 +36,12 @@ export async function middleware(request: NextRequest) {
   } = await supabase.auth.getUser()
 
   // Allow public access to external API endpoints and payment redirect page
-  const isPublicApiRoute = 
+  const isPublicApiRoute =
     request.nextUrl.pathname.startsWith('/api/health') ||
     request.nextUrl.pathname.startsWith('/api/licenses/verify') ||
     request.nextUrl.pathname.startsWith('/api/licenses/activate') ||
     request.nextUrl.pathname.startsWith('/api/licenses/purchase') ||
+    request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||
     request.nextUrl.pathname.startsWith('/api/signup/') ||
     request.nextUrl.pathname.startsWith('/api/partners/approve') ||
     request.nextUrl.pathname.startsWith('/api/partners/grant-access') ||

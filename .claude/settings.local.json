@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(git checkout *)",
+      "Bash(test -f app/api/partners/\\\\[id\\\\]/approve/route.ts)"
+    ]
+  }
+}

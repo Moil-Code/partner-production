@@ -118,9 +118,12 @@ export async function POST(request: Request) {
     if (emailResult.success && emailResult.messageId) {
       await supabase
         .from('licenses')
-        .update({ 
+        .update({
           message_id: emailResult.messageId,
-          email_status: 'sent'
+          email_status: 'sent',
+          activation_email_sent_at: new Date().toISOString(),
+          last_reminder_sent_at: null,
+          reminder_count: 0,
         })
         .eq('id', license.id);
     } else {

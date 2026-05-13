@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { sendBatchLicenseActivationEmails } from '@/lib/email';
+import { parseLicensePlanDefaults } from '@/lib/licensePlanDefaults';
 
 export async function POST(request: Request) {
   try {
@@ -72,6 +73,11 @@ export async function POST(request: Request) {
     if (!file) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
+
+    // Capture optional plan defaults. Partner CSV import doesn't send these,
+    // so we keep them as-is and only validate / forward to the external
+    // activate_license API if a caller actually provides `plan`.
+    const planFromForm = formData.get('plan');
 
     // Read CSV file
     const text = await file.text();
@@ -159,34 +165,48 @@ export async function POST(request: Request) {
       .filter(check => check.exists)
       .map(check => check.email);
 
-    // Check external database for already activated licenses using batch endpoint
+    // External activate_license call — ONLY when the caller provides plan
+    // defaults. Partner CSV import doesn't, so this whole block is skipped
+    // and we never communicate with the external endpoint.
     const emailsToSkipActivation = new Set<string>();
-    try {
-      if (process.env.NEXT_PUBLIC_QC_API_KEY && newEmails.length > 0) {
-        const externalResponse = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
-          },
-          body: JSON.stringify({ emails: newEmails }),
-        });
+    if (planFromForm !== null && planFromForm !== '') {
+      const planParse = parseLicensePlanDefaults({
+        plan: planFromForm,
+        billingCycle: formData.get('billingCycle'),
+        months: formData.get('months'),
+      });
+      if (!planParse.ok) {
+        return NextResponse.json({ error: planParse.error }, { status: 400 });
+      }
+      const planDefaults = planParse.defaults;
 
-        if (externalResponse.ok) {
-          const externalData = await externalResponse.json();
-          // Check results for activated licenses
-          if (externalData.data?.results && Array.isArray(externalData.data.results)) {
-            externalData.data.results.forEach((result: any) => {
-              if (result.license_status === 'activated') {
-                emailsToSkipActivation.add(result.email);
-              }
-            });
+      try {
+        if (process.env.NEXT_PUBLIC_QC_API_KEY && newEmails.length > 0) {
+          const externalResponse = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
+            },
+            body: JSON.stringify({ emails: newEmails, defaults: planDefaults }),
+          });
+
+          if (externalResponse.ok) {
+            const externalData = await externalResponse.json();
+            // Check results for activated licenses
+            if (externalData.data?.results && Array.isArray(externalData.data.results)) {
+              externalData.data.results.forEach((result: any) => {
+                if (result.license_status === 'activated') {
+                  emailsToSkipActivation.add(result.email);
+                }
+              });
+            }
           }
         }
+      } catch (externalError) {
+        console.error('Error checking external license status:', externalError);
+        // Continue with normal flow if external check fails
       }
-    } catch (externalError) {
-      console.error('Error checking external license status:', externalError);
-      // Continue with normal flow if external check fails
     }
 
     // Insert all new licenses in batch

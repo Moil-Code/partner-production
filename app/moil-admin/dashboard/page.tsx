@@ -12,6 +12,18 @@ import Logo from '@/components/ui/Logo';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
 import { ConfirmationModal } from '@/components/ui/confirmation-modal';
 import { useAuthStore, usePartnerStore, useTeamStore, useUIStore } from '@/lib/stores';
+import {
+  LICENSE_PLANS,
+  MAX_MONTHS,
+  type BillingCycle,
+  type LicensePlan,
+} from '@/lib/licensePlanDefaults';
+
+const PLAN_LABELS: Record<LicensePlan, string> = {
+  standard: 'Standard',
+  professional: 'Professional',
+  market_pro: 'Market Pro',
+};
 import { 
   Building2, 
   TrendingUp, 
@@ -76,7 +88,17 @@ export default function MoilAdminDashboard() {
   const [updatingStatus, setUpdatingStatus] = React.useState<string | null>(null);
   const [showAddLicenseModal, setShowAddLicenseModal] = React.useState(false);
   const [licenseEmail, setLicenseEmail] = React.useState('');
+  const [licensePlan, setLicensePlan] = React.useState<LicensePlan | ''>('');
+  const [licenseBillingCycle, setLicenseBillingCycle] = React.useState<BillingCycle>('yearly');
+  const [licenseMonths, setLicenseMonths] = React.useState<string>('');
   const [addingLicense, setAddingLicense] = React.useState(false);
+
+  const resetAddLicenseForm = () => {
+    setLicenseEmail('');
+    setLicensePlan('');
+    setLicenseBillingCycle('yearly');
+    setLicenseMonths('');
+  };
   const [licenses, setLicenses] = React.useState<any[]>([]);
   const [licensesLoading, setLicensesLoading] = React.useState(false);
   
@@ -315,6 +337,25 @@ export default function MoilAdminDashboard() {
       return;
     }
 
+    if (!licensePlan) {
+      toast({ title: 'Plan Required', description: 'Please select a plan.', type: 'warning' });
+      return;
+    }
+
+    let monthsValue: number | undefined;
+    if (licenseBillingCycle === 'monthly') {
+      const n = Number.parseInt(licenseMonths, 10);
+      if (!Number.isInteger(n) || n < 1 || n > MAX_MONTHS) {
+        toast({
+          title: 'Invalid months',
+          description: `Months must be between 1 and ${MAX_MONTHS} when billing monthly.`,
+          type: 'warning',
+        });
+        return;
+      }
+      monthsValue = n;
+    }
+
     setAddingLicense(true);
     try {
       const response = await fetch('/api/licenses/add', {
@@ -323,6 +364,9 @@ export default function MoilAdminDashboard() {
         body: JSON.stringify({
           email: licenseEmail.trim().toLowerCase(),
           adminId: admin.id,
+          plan: licensePlan,
+          billingCycle: licenseBillingCycle,
+          ...(monthsValue !== undefined && { months: monthsValue }),
         }),
       });
 
@@ -343,9 +387,9 @@ export default function MoilAdminDashboard() {
         type: 'success',
       });
 
-      setLicenseEmail('');
+      resetAddLicenseForm();
       setShowAddLicenseModal(false);
-      
+
       // Refresh licenses list if on licenses tab
       if (activeTab === 'licenses') {
         fetchLicenses();
@@ -1069,7 +1113,7 @@ export default function MoilAdminDashboard() {
                 <button
                   onClick={() => {
                     setShowAddLicenseModal(false);
-                    setLicenseEmail('');
+                    resetAddLicenseForm();
                   }}
                   className="text-[var(--text-tertiary)] hover:text-[var(--text-primary)] transition-colors"
                 >
@@ -1098,6 +1142,65 @@ export default function MoilAdminDashboard() {
                 </p>
               </div>
 
+              {/* Plan */}
+              <div>
+                <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
+                  Plan *
+                </label>
+                <select
+                  value={licensePlan}
+                  onChange={(e) => setLicensePlan(e.target.value as LicensePlan | '')}
+                  disabled={addingLicense}
+                  className="w-full px-4 py-2.5 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/20 focus:border-[var(--primary)] text-[var(--text-primary)]"
+                  required
+                >
+                  <option value="">Select a plan…</option>
+                  {LICENSE_PLANS.map((p) => (
+                    <option key={p} value={p}>{PLAN_LABELS[p]}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Billing Cycle + Months */}
+              <div className={`grid gap-3 ${licenseBillingCycle === 'monthly' ? 'sm:grid-cols-2' : 'sm:grid-cols-1'}`}>
+                <div>
+                  <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
+                    Billing cycle *
+                  </label>
+                  <select
+                    value={licenseBillingCycle}
+                    onChange={(e) => {
+                      const next = e.target.value as BillingCycle;
+                      setLicenseBillingCycle(next);
+                      if (next === 'yearly') setLicenseMonths('');
+                    }}
+                    disabled={addingLicense}
+                    className="w-full px-4 py-2.5 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/20 focus:border-[var(--primary)] text-[var(--text-primary)]"
+                  >
+                    <option value="yearly">Yearly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </div>
+                {licenseBillingCycle === 'monthly' && (
+                  <div>
+                    <label className="block text-sm font-medium text-[var(--text-secondary)] mb-2">
+                      Months (1–{MAX_MONTHS}) *
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={MAX_MONTHS}
+                      value={licenseMonths}
+                      onChange={(e) => setLicenseMonths(e.target.value)}
+                      disabled={addingLicense}
+                      placeholder="e.g. 6"
+                      className="w-full px-4 py-2.5 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/20 focus:border-[var(--primary)] text-[var(--text-primary)] placeholder-[var(--text-tertiary)]"
+                      required
+                    />
+                  </div>
+                )}
+              </div>
+
               {/* Actions */}
               <div className="flex gap-3 pt-4">
                 <Button
@@ -1105,7 +1208,7 @@ export default function MoilAdminDashboard() {
                   variant="outline"
                   onClick={() => {
                     setShowAddLicenseModal(false);
-                    setLicenseEmail('');
+                    resetAddLicenseForm();
                   }}
                   disabled={addingLicense}
                   className="flex-1"
@@ -1115,7 +1218,7 @@ export default function MoilAdminDashboard() {
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={addingLicense || !licenseEmail.trim()}
+                  disabled={addingLicense || !licenseEmail.trim() || !licensePlan || (licenseBillingCycle === 'monthly' && !licenseMonths)}
                   loading={addingLicense}
                   className="flex-1"
                 >

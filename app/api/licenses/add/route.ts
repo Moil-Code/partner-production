@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { sendLicenseActivationEmail } from '@/lib/email';
+import { parseLicensePlanDefaults } from '@/lib/licensePlanDefaults';
 
 export async function POST(request: Request) {
   try {
-    const { email } = await request.json();
+    const body = await request.json();
+    const { email } = body;
 
     // Validate email
     if (!email || !email.includes('@')) {
@@ -13,6 +15,7 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+
 
     const supabase = await createClient();
 
@@ -121,33 +124,46 @@ export async function POST(request: Request) {
       );
     }
 
-    // Check if email already has an activated license in external database using batch endpoint
+    // External activate_license call — ONLY when the caller (moil-admin modal)
+    // provides plan/billingCycle/months. Partner-admin issuing flow omits
+    // `plan` entirely → no external communication.
     let skipActivationEmail = false;
-    try {
-      if (process.env.NEXT_PUBLIC_QC_API_KEY) {
-        const externalResponse = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
-          },
-          body: JSON.stringify({ emails: [email.toLowerCase()] }),
-        });
+    if (body.plan !== undefined && body.plan !== null && body.plan !== '') {
+      const planParse = parseLicensePlanDefaults(body);
+      if (!planParse.ok) {
+        return NextResponse.json({ error: planParse.error }, { status: 400 });
+      }
+      const planDefaults = planParse.defaults;
 
-        if (externalResponse.ok) {
-          const externalData = await externalResponse.json();
-          // Check if any result shows activated status
-          if (externalData.data?.results && externalData.data.results.length > 0) {
-            const result = externalData.data.results[0];
-            if (result.license_status === 'activated') {
-              skipActivationEmail = true;
+      try {
+        if (process.env.NEXT_PUBLIC_QC_API_KEY) {
+          const externalResponse = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
+            },
+            body: JSON.stringify({
+              emails: [email.toLowerCase()],
+              defaults: planDefaults,
+            }),
+          });
+
+          if (externalResponse.ok) {
+            const externalData = await externalResponse.json();
+            // Check if any result shows activated status
+            if (externalData.data?.results && externalData.data.results.length > 0) {
+              const result = externalData.data.results[0];
+              if (result.license_status === 'activated') {
+                skipActivationEmail = true;
+              }
             }
           }
         }
+      } catch (externalError) {
+        console.error('Error checking external license status:', externalError);
+        // Continue with normal flow if external check fails
       }
-    } catch (externalError) {
-      console.error('Error checking external license status:', externalError);
-      // Continue with normal flow if external check fails
     }
 
     // Check if team has available licenses
@@ -216,9 +232,10 @@ export async function POST(request: Request) {
       if (emailResult.success && emailResult.messageId) {
         await supabase
           .from('licenses')
-          .update({ 
+          .update({
             message_id: emailResult.messageId,
-            email_status: 'sent'
+            email_status: 'sent',
+            activation_email_sent_at: new Date().toISOString(),
           })
           .eq('id', license.id);
       } else {

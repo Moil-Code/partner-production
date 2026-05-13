@@ -1,5 +1,6 @@
 import { Resend } from 'resend';
 import { LicenseActivationEmail } from '../emails/license-activation';
+import { LicenseActivationReminderEmail } from '../emails/license-activation-reminder';
 import { TeamInvitationEmail } from '../emails/team-invitation';
 import { PartnerAccessRequestEmail } from '../emails/partner-access-request';
 import { PartnerApprovedEmail } from '../emails/partner-approved';
@@ -225,6 +226,55 @@ export async function sendLicenseActivationEmail(data: LicenseActivationData) {
   } catch (error) {
     console.error('Error sending license activation email:', error);
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+}
+
+export interface LicenseActivationReminderData {
+  email: string;
+  activationUrl: string;
+  daysSinceAssigned: number;
+  reminderNumber: number;
+  adminEmail?: string;
+  edc?: EdcEmailInfo;
+}
+
+export async function sendLicenseActivationReminderEmail(
+  data: LicenseActivationReminderData,
+) {
+  try {
+    if (!process.env.RESEND_API) {
+      throw new Error('RESEND_API environment variable is not configured.');
+    }
+
+    const edcInfo = getEdcInfoForEmail(data.adminEmail, data.edc);
+
+    const result = await emailQueue.add(async () => {
+      return resend.emails.send({
+        from: FROM_EMAIL,
+        to: data.email,
+        subject: `Reminder: activate your ${edcInfo.programName} license`,
+        react: LicenseActivationReminderEmail({
+          email: data.email,
+          activationUrl: data.activationUrl,
+          daysSinceAssigned: data.daysSinceAssigned,
+          reminderNumber: data.reminderNumber,
+          edc: edcInfo,
+        }),
+      });
+    });
+
+    if (result.error) {
+      console.error('Resend API error (reminder):', result.error);
+      return { success: false, error: result.error.message };
+    }
+
+    return { success: true, messageId: result.data?.id };
+  } catch (error) {
+    console.error('Error sending license activation reminder email:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
   }
 }
 
