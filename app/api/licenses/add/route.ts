@@ -160,7 +160,7 @@ export async function POST(request: Request) {
     }
 
     const status = moilResult?.license_status;
-    const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/login`;
+    const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/login?ref=moilPartners&org=${orgSlug}`;
     const activationUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/register?licenseId=${license.id}&ref=moilPartners&org=${orgSlug}`;
 
     let emailStatus = 'pending';

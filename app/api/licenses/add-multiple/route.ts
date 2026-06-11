@@ -210,7 +210,7 @@ export async function POST(request: Request) {
     }
 
     // Bucket emails by outcome for targeted email dispatch.
-    const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/login`;
+    const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/login?ref=moilPartners&org=${orgSlug}`;
     const adminName = `${adminData.first_name} ${adminData.last_name}`;
 
     const toActivationEmail: Array<{ email: string; licenseId: string; activationUrl: string }> = [];
