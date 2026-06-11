@@ -32,7 +32,7 @@ export async function POST(request: Request) {
     // Verify user is an admin and get team info with full partner branding
     const { data: adminData, error: adminError } = await supabase
       .from('admins')
-      .select('*, partner:partners(id, name, program_name, logo_url, logo_initial, primary_color, support_email)')
+      .select('*, partner:partners(id, name, program_name, logo_url, logo_initial, primary_color, support_email, license_plan, license_billing_cycle)')
       .eq('id', user.id)
       .single();
 
@@ -44,14 +44,16 @@ export async function POST(request: Request) {
     }
 
     // Get partner info for activation URL and email branding
-    const partnerInfo = adminData.partner as { 
-      id: string; 
-      name: string; 
+    const partnerInfo = adminData.partner as {
+      id: string;
+      name: string;
       program_name?: string;
       logo_url?: string;
       logo_initial?: string;
       primary_color?: string;
       support_email?: string;
+      license_plan?: string | null;
+      license_billing_cycle?: string | null;
     } | null;
     const partnerName = partnerInfo?.name || 'moil-partners';
     // Create URL-safe org name (replace spaces with hyphens)
@@ -124,46 +126,23 @@ export async function POST(request: Request) {
       );
     }
 
-    // External activate_license call — ONLY when the caller (moil-admin modal)
-    // provides plan/billingCycle/months. Partner-admin issuing flow omits
-    // `plan` entirely → no external communication.
-    let skipActivationEmail = false;
-    if (body.plan !== undefined && body.plan !== null && body.plan !== '') {
-      const planParse = parseLicensePlanDefaults(body);
+    // Resolve plan defaults: explicit body values take precedence, then the
+    // partner's pre-configured license plan. This lets partners like Buda Hive
+    // have their plan (e.g. standard/yearly) auto-applied on every license
+    // they issue without requiring the Moil-admin UI.
+    let planDefaults = null;
+    const planSource = body.plan !== undefined && body.plan !== null && body.plan !== ''
+      ? body
+      : (partnerInfo?.license_plan
+          ? { plan: partnerInfo.license_plan, billingCycle: partnerInfo.license_billing_cycle || 'yearly' }
+          : null);
+
+    if (planSource) {
+      const planParse = parseLicensePlanDefaults(planSource);
       if (!planParse.ok) {
         return NextResponse.json({ error: planParse.error }, { status: 400 });
       }
-      const planDefaults = planParse.defaults;
-
-      try {
-        if (process.env.NEXT_PUBLIC_QC_API_KEY) {
-          const externalResponse = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
-            },
-            body: JSON.stringify({
-              emails: [email.toLowerCase()],
-              defaults: planDefaults,
-            }),
-          });
-
-          if (externalResponse.ok) {
-            const externalData = await externalResponse.json();
-            // Check if any result shows activated status
-            if (externalData.data?.results && externalData.data.results.length > 0) {
-              const result = externalData.data.results[0];
-              if (result.license_status === 'activated') {
-                skipActivationEmail = true;
-              }
-            }
-          }
-        }
-      } catch (externalError) {
-        console.error('Error checking external license status:', externalError);
-        // Continue with normal flow if external check fails
-      }
+      planDefaults = planParse.defaults;
     }
 
     // Check if team has available licenses
@@ -175,7 +154,7 @@ export async function POST(request: Request) {
         .eq('team_id', teamId);
 
       const availableLicenses = (team.purchased_license_count || 0) - (assignedCount || 0);
-      
+
       if (availableLicenses <= 0) {
         return NextResponse.json(
           { error: 'No available licenses. Please purchase more licenses.' },
@@ -184,7 +163,10 @@ export async function POST(request: Request) {
       }
     }
 
-    // Create new license (business info will be added during activation)
+    // Create the license row first so we have an ID to pass to the Moil
+    // backend. The external activate_license call needs the licenseId to
+    // back-fill business_name/type on this row for already-registered users
+    // who skip the self-serve activation flow.
     const { data: license, error: licenseError } = await supabase
       .from('licenses')
       .insert({
@@ -207,14 +189,54 @@ export async function POST(request: Request) {
       );
     }
 
+    // Notify the Moil backend to grant or upgrade the user's subscription
+    // whenever plan defaults are resolved (from body or partner config).
+    // Passing licenseId lets the backend back-fill business_name/type on this
+    // row for already-registered users who skip the self-serve activation flow.
+    let skipActivationEmail = false;
+    if (planDefaults) {
+      try {
+        if (process.env.NEXT_PUBLIC_QC_API_KEY) {
+          const externalResponse = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
+            },
+            body: JSON.stringify({
+              emails: [{ email: email.toLowerCase(), licenseId: license.id }],
+              defaults: planDefaults,
+            }),
+          });
+
+          if (externalResponse.ok) {
+            const externalData = await externalResponse.json();
+            // Skip the activation email when the user is already active on Moil
+            // (activated = newly enrolled, already_assigned = same plan active,
+            //  blocked_downgrade = user is on a higher plan).
+            if (externalData.data?.results && externalData.data.results.length > 0) {
+              const result = externalData.data.results[0];
+              const alreadyActive = ['activated', 'already_assigned', 'blocked_downgrade'];
+              if (alreadyActive.includes(result.license_status)) {
+                skipActivationEmail = true;
+              }
+            }
+          }
+        }
+      } catch (externalError) {
+        console.error('Error checking external license status:', externalError);
+        // Continue with normal flow if external check fails
+      }
+    }
+
     // Send activation email with dynamic partner org name (skip if already activated in external system)
     const activationUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/register?licenseId=${license.id}&ref=moilPartners&org=${orgSlug}`;
-    
+
     if (skipActivationEmail) {
       // License already activated in external system - mark as activated and skip email
       await supabase
         .from('licenses')
-        .update({ 
+        .update({
           is_activated: true,
           email_status: 'skipped',
           activated_at: new Date().toISOString()
