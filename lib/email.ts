@@ -1,6 +1,8 @@
 import { Resend } from 'resend';
 import { LicenseActivationEmail } from '../emails/license-activation';
 import { LicenseActivationReminderEmail } from '../emails/license-activation-reminder';
+import { LicenseClaimEmail } from '../emails/license-claim';
+import { LicenseActivatedEmail } from '../emails/license-activated';
 import { TeamInvitationEmail } from '../emails/team-invitation';
 import { PartnerAccessRequestEmail } from '../emails/partner-access-request';
 import { PartnerApprovedEmail } from '../emails/partner-approved';
@@ -672,4 +674,120 @@ export async function sendPartnerSignupInviteEmail(data: PartnerSignupInviteData
     console.error('Error sending partner signup invite email:', error);
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
   }
+}
+
+// ============================================
+// LICENSE CLAIM EMAIL (account exists, no profile yet)
+// ============================================
+
+export interface LicenseClaimData {
+  email: string;
+  loginUrl: string;
+  partnerName: string;
+  edc?: EdcEmailInfo;
+}
+
+export async function sendLicenseClaimEmail(data: LicenseClaimData) {
+  try {
+    if (!process.env.RESEND_API) {
+      throw new Error('RESEND_API environment variable is not configured.');
+    }
+    const edcInfo = getEdcInfoForEmail(undefined, data.edc);
+    const result = await emailQueue.add(async () =>
+      resend.emails.send({
+        from: FROM_EMAIL,
+        to: data.email,
+        subject: `You've been assigned a license by ${data.partnerName} — claim it now`,
+        react: LicenseClaimEmail({
+          email: data.email,
+          loginUrl: data.loginUrl,
+          partnerName: data.partnerName,
+          edc: edcInfo,
+        }),
+      })
+    );
+    if (result.error) {
+      console.error('Resend API error (claim):', result.error);
+      return { success: false, error: result.error.message };
+    }
+    return { success: true, messageId: result.data?.id };
+  } catch (error) {
+    console.error('Error sending license claim email:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+}
+
+export async function sendBatchLicenseClaimEmails(
+  items: LicenseClaimData[]
+): Promise<{ results: Array<{ email: string; success: boolean; messageId?: string }>; sent: number; failed: number }> {
+  const results = await Promise.all(
+    items.map(async (item) => {
+      const r = await sendLicenseClaimEmail(item);
+      return { email: item.email, ...r };
+    })
+  );
+  return {
+    results,
+    sent: results.filter((r) => r.success).length,
+    failed: results.filter((r) => !r.success).length,
+  };
+}
+
+// ============================================
+// LICENSE ACTIVATED EMAIL (profile exists — plan applied directly)
+// ============================================
+
+export interface LicenseActivatedData {
+  email: string;
+  loginUrl: string;
+  partnerName: string;
+  planName: string;
+  edc?: EdcEmailInfo;
+}
+
+export async function sendLicenseActivatedEmail(data: LicenseActivatedData) {
+  try {
+    if (!process.env.RESEND_API) {
+      throw new Error('RESEND_API environment variable is not configured.');
+    }
+    const edcInfo = getEdcInfoForEmail(undefined, data.edc);
+    const result = await emailQueue.add(async () =>
+      resend.emails.send({
+        from: FROM_EMAIL,
+        to: data.email,
+        subject: `Your ${data.planName} license from ${data.partnerName} is now active ✅`,
+        react: LicenseActivatedEmail({
+          email: data.email,
+          loginUrl: data.loginUrl,
+          partnerName: data.partnerName,
+          planName: data.planName,
+          edc: edcInfo,
+        }),
+      })
+    );
+    if (result.error) {
+      console.error('Resend API error (activated):', result.error);
+      return { success: false, error: result.error.message };
+    }
+    return { success: true, messageId: result.data?.id };
+  } catch (error) {
+    console.error('Error sending license activated email:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+  }
+}
+
+export async function sendBatchLicenseActivatedEmails(
+  items: LicenseActivatedData[]
+): Promise<{ results: Array<{ email: string; success: boolean; messageId?: string }>; sent: number; failed: number }> {
+  const results = await Promise.all(
+    items.map(async (item) => {
+      const r = await sendLicenseActivatedEmail(item);
+      return { email: item.email, ...r };
+    })
+  );
+  return {
+    results,
+    sent: results.filter((r) => r.success).length,
+    failed: results.filter((r) => !r.success).length,
+  };
 }

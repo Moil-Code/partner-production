@@ -92,9 +92,7 @@ export async function PATCH(
       'font_family',
       'support_email',
       'license_duration',
-      'features',
-      'license_plan',
-      'license_billing_cycle'
+      'features'
     ];
 
     // Moil admins can update all fields including these restricted ones

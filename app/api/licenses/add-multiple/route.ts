@@ -1,14 +1,21 @@
 import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
-import { sendBatchLicenseActivationEmails } from '@/lib/email';
-import { parseLicensePlanDefaults } from '@/lib/licensePlanDefaults';
+import {
+  sendBatchLicenseActivationEmails,
+  sendBatchLicenseClaimEmails,
+  sendBatchLicenseActivatedEmails,
+  type EdcEmailInfo,
+} from '@/lib/email';
+
+// All partner-issued licenses grant exactly this plan.
+const PARTNER_PLAN_DEFAULTS = { plan: 'standard', billingCycle: 'yearly' };
+const PARTNER_PLAN_DISPLAY = 'Standard Annual';
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { emails } = body;
 
-    // Validate emails array
     if (!emails || !Array.isArray(emails) || emails.length === 0) {
       return NextResponse.json(
         { error: 'Valid email addresses are required' },
@@ -16,34 +23,23 @@ export async function POST(request: Request) {
       );
     }
 
-
     const supabase = await createClient();
 
-    // Get current admin user
     const { data: { user }, error: authError } = await supabase.auth.getUser();
-
     if (authError || !user) {
-      return NextResponse.json(
-        { error: 'Unauthorized. Please login.' },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: 'Unauthorized. Please login.' }, { status: 401 });
     }
 
-    // Verify user is an admin and get partner info with full branding
     const { data: adminData, error: adminError } = await supabase
       .from('admins')
-      .select('*, partner:partners(id, name, program_name, logo_url, logo_initial, primary_color, support_email, license_plan, license_billing_cycle)')
+      .select('*, partner:partners(id, name, program_name, logo_url, logo_initial, primary_color, support_email)')
       .eq('id', user.id)
       .single();
 
     if (adminError || !adminData) {
-      return NextResponse.json(
-        { error: 'Access denied. Admin account required.' },
-        { status: 403 }
-      );
+      return NextResponse.json({ error: 'Access denied. Admin account required.' }, { status: 403 });
     }
 
-    // Get partner info for activation URL and email branding
     const partnerInfo = adminData.partner as {
       id: string;
       name: string;
@@ -52,43 +48,32 @@ export async function POST(request: Request) {
       logo_initial?: string;
       primary_color?: string;
       support_email?: string;
-      license_plan?: string | null;
-      license_billing_cycle?: string | null;
     } | null;
-    const partnerName = partnerInfo?.name || 'moil-partners';
-    // Create URL-safe org name (replace spaces with hyphens)
-    // Partner names are already lowercase and contain only alphanumeric chars and spaces
-    const orgSlug = partnerName.replace(/\s+/g, '-');
-    
-    // Build EDC info for email from partner data
-    const edcInfo = partnerInfo ? {
-      programName: partnerInfo.program_name || partnerInfo.name || 'Moil Partners',
-      fullName: partnerInfo.name || 'Moil Partners',
-      logo: partnerInfo.logo_url || undefined, // Don't default to Moil logo - let email template use logoInitial fallback
-      logoInitial: partnerInfo.logo_initial || partnerInfo.name?.charAt(0) || 'M',
-      primaryColor: partnerInfo.primary_color || '#5843BE',
-      supportEmail: partnerInfo.support_email || 'support@moilapp.com',
-      licenseDuration: '12 months',
-    } : undefined;
 
-    // Get user's team membership and team info
+    const partnerName = partnerInfo?.program_name || partnerInfo?.name || 'Moil Partners';
+    const orgSlug = (partnerInfo?.name || 'moil-partners').replace(/\s+/g, '-');
+
+    const edcInfo: EdcEmailInfo = {
+      programName: partnerInfo?.program_name || partnerInfo?.name || 'Moil Partners',
+      fullName: partnerInfo?.name || 'Moil Partners',
+      logo: partnerInfo?.logo_url || undefined,
+      logoInitial: partnerInfo?.logo_initial || partnerInfo?.name?.charAt(0) || 'M',
+      primaryColor: partnerInfo?.primary_color || '#5843BE',
+      supportEmail: partnerInfo?.support_email || 'support@moilapp.com',
+      licenseDuration: '12 months',
+    };
+
     const { data: teamMember } = await supabase
       .from('team_members')
-      .select(`
-        team_id,
-        team:teams (
-          id,
-          purchased_license_count
-        )
-      `)
+      .select('team_id, team:teams(id, purchased_license_count)')
       .eq('admin_id', user.id)
       .single();
 
     const teamId = teamMember?.team_id;
     const team = teamMember?.team as unknown as { id: string; purchased_license_count: number } | null;
 
-    // Check available licenses for team
-    let availableLicenses = Infinity; // Unlimited for solo admins
+    // Team capacity check
+    let availableLicenses = Infinity;
     if (teamId && team) {
       const { count: assignedCount } = await supabase
         .from('licenses')
@@ -96,14 +81,12 @@ export async function POST(request: Request) {
         .eq('team_id', teamId);
 
       availableLicenses = (team.purchased_license_count || 0) - (assignedCount || 0);
-      
       if (availableLicenses <= 0) {
         return NextResponse.json(
           { error: 'No available licenses. Please purchase more licenses.' },
           { status: 400 }
         );
       }
-
       if (emails.length > availableLicenses) {
         return NextResponse.json(
           { error: `Only ${availableLicenses} license(s) available. You're trying to add ${emails.length}.` },
@@ -112,269 +95,236 @@ export async function POST(request: Request) {
       }
     }
 
-    // Parse and validate emails using functional programming
     const parsedEmails = emails
-      .map(email => email.trim().toLowerCase())
-      .filter(email => email && email.includes('@'));
+      .map((e: string) => e.trim().toLowerCase())
+      .filter((e: string) => e && e.includes('@'));
 
-    const invalidEmails = emails.filter(email => {
-      const trimmed = email.trim().toLowerCase();
-      return !trimmed || !trimmed.includes('@');
+    const invalidEmails = emails.filter((e: string) => {
+      const t = e.trim().toLowerCase();
+      return !t || !t.includes('@');
     });
 
-    // Check globally if any email already has a license from ANY partner using admin client (optimized batch query)
+    // Global duplicate check (batch)
     const adminSupabase = createAdminClient();
-    const lowercaseEmails = parsedEmails.map(e => e.toLowerCase());
-
     const { data: existingLicenses } = await adminSupabase
       .from('licenses')
       .select('email')
-      .in('email', lowercaseEmails);
+      .in('email', parsedEmails);
 
-    const licensedEmails = new Set(existingLicenses?.map(l => l.email) || []);
-
-    const globalChecks = parsedEmails.map(email => ({
-      email,
-      hasGlobalLicense: licensedEmails.has(email.toLowerCase()),
-    }));
-
-    const emailsWithGlobalLicenses = globalChecks.filter(check => check.hasGlobalLicense);
+    const licensedEmails = new Set(existingLicenses?.map((l: { email: string }) => l.email) || []);
+    const emailsWithGlobalLicenses = parsedEmails.filter((e: string) => licensedEmails.has(e));
 
     if (emailsWithGlobalLicenses.length > 0) {
-      const errorMessages = emailsWithGlobalLicenses.map(check => check.email).join(', ');
-      
       return NextResponse.json(
-        { 
-          error: `The following email(s) already have licenses allocated: ${errorMessages}. If this is a mistake, please contact cs@moilapp.com`,
-          emailsWithLicenses: emailsWithGlobalLicenses.map(check => check.email)
+        {
+          error: `The following email(s) already have licenses allocated: ${emailsWithGlobalLicenses.join(', ')}. If this is a mistake, please contact cs@moilapp.com`,
+          emailsWithLicenses: emailsWithGlobalLicenses,
         },
         { status: 400 }
       );
     }
 
-    // Check for existing licenses in parallel
+    // Per-admin/team duplicate check
     const existingChecks = await Promise.all(
-      parsedEmails.map(async (email) => {
-        let existingQuery = supabase
-          .from('licenses')
-          .select('id')
-          .eq('email', email);
-
-        if (teamId) {
-          existingQuery = existingQuery.eq('team_id', teamId);
-        } else {
-          existingQuery = existingQuery.eq('admin_id', user.id);
-        }
-
-        const { data: existing } = await existingQuery.single();
-        return { email, exists: !!existing };
+      parsedEmails.map(async (email: string) => {
+        let q = supabase.from('licenses').select('id').eq('email', email);
+        q = teamId ? q.eq('team_id', teamId) : q.eq('admin_id', user.id);
+        const { data } = await q.single();
+        return { email, exists: !!data };
       })
     );
 
-    // Filter out existing emails
-    const newEmails = existingChecks
-      .filter(check => !check.exists)
-      .map(check => check.email);
+    const newEmails = existingChecks.filter((c) => !c.exists).map((c) => c.email);
+    const existingEmails = existingChecks.filter((c) => c.exists).map((c) => c.email);
 
-    const existingEmails = existingChecks
-      .filter(check => check.exists)
-      .map(check => check.email);
-
-    // Resolve plan defaults: explicit body values take precedence, then the
-    // partner's pre-configured license plan.
-    let planDefaults = null;
-    const planSource = body.plan !== undefined && body.plan !== null && body.plan !== ''
-      ? body
-      : (partnerInfo?.license_plan
-          ? { plan: partnerInfo.license_plan, billingCycle: partnerInfo.license_billing_cycle || 'yearly' }
-          : null);
-
-    if (planSource) {
-      const planParse = parseLicensePlanDefaults(planSource);
-      if (!planParse.ok) {
-        return NextResponse.json({ error: planParse.error }, { status: 400 });
-      }
-      planDefaults = planParse.defaults;
+    if (newEmails.length === 0) {
+      return NextResponse.json(
+        { message: 'All provided emails already have licenses.', results: { success: 0, failed: existingEmails.length, errors: existingEmails.map((e) => `License already exists for: ${e}`) } },
+        { status: 200 }
+      );
     }
 
-    // Insert all new licenses first so we have IDs to pass to the Moil backend.
-    // The external activate_license call needs licenseId to back-fill
-    // business_name/type for already-registered users who skip the self-serve
-    // activation flow.
-    const licensesToInsert = newEmails.map(email => ({
-      email,
-      admin_id: user.id,
-      business_name: '',
-      business_type: '',
-      is_activated: false,
-      team_id: teamId || null,
-      performed_by: user.id,
-    }));
-
+    // Insert all new license rows first so we can pass licenseIds to the Moil backend.
     const { data: insertedLicenses, error: insertError } = await supabase
       .from('licenses')
-      .insert(licensesToInsert)
+      .insert(
+        newEmails.map((email) => ({
+          email,
+          admin_id: user.id,
+          business_name: '',
+          business_type: '',
+          is_activated: false,
+          team_id: teamId || null,
+          performed_by: user.id,
+        }))
+      )
       .select();
 
     if (insertError) {
       console.error('Batch insert error:', insertError);
-      return NextResponse.json(
-        { error: `Failed to insert licenses: ${insertError.message}` },
-        { status: 500 }
-      );
+      return NextResponse.json({ error: `Failed to insert licenses: ${insertError.message}` }, { status: 500 });
     }
 
-    // Build a map of email → licenseId for the external call and follow-up updates.
-    const licenseIdByEmail = new Map(
-      (insertedLicenses || []).map(l => [l.email, l.id])
+    type InsertedLicense = { id: string; email: string; is_activated: boolean; created_at: string };
+    const licenseByEmail = new Map<string, InsertedLicense>(
+      ((insertedLicenses || []) as InsertedLicense[]).map((l) => [l.email, l])
     );
 
-    // Notify the Moil backend to grant or upgrade each user's subscription.
-    // Passing licenseId lets the backend back-fill business_name/type for
-    // already-registered users who skip the self-serve activation flow.
-    const emailsToSkipActivation = new Set<string>();
-    if (planDefaults && newEmails.length > 0) {
-      try {
-        if (process.env.NEXT_PUBLIC_QC_API_KEY) {
-          const emailsWithIds = newEmails.map(email => ({
-            email,
-            licenseId: licenseIdByEmail.get(email),
-          }));
-          const externalResponse = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`, {
+    // Call Moil backend once for the entire batch.
+    type MoilResult = { email: string; license_status: string; has_account?: boolean };
+    const moilResultByEmail = new Map<string, MoilResult>();
+
+    try {
+      if (process.env.NEXT_PUBLIC_QC_API_KEY && newEmails.length > 0) {
+        const resp = await fetch(
+          `${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`,
+          {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
             },
-            body: JSON.stringify({ emails: emailsWithIds, defaults: planDefaults }),
-          });
+            body: JSON.stringify({
+              emails: newEmails.map((email) => ({
+                email,
+                licenseId: licenseByEmail.get(email)?.id,
+              })),
+              defaults: PARTNER_PLAN_DEFAULTS,
+              source: partnerInfo?.name || 'moil',
+              requestedBy: user.id,
+            }),
+          }
+        );
 
-          if (externalResponse.ok) {
-            const externalData = await externalResponse.json();
-            // Skip activation email when the user is already active on Moil
-            // (activated = newly enrolled, already_assigned = same plan active,
-            //  blocked_downgrade = user is on a higher plan).
-            const alreadyActive = new Set(['activated', 'already_assigned', 'blocked_downgrade']);
-            if (externalData.data?.results && Array.isArray(externalData.data.results)) {
-              externalData.data.results.forEach((result: { email: string; license_status: string }) => {
-                if (alreadyActive.has(result.license_status)) {
-                  emailsToSkipActivation.add(result.email);
-                }
-              });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.data?.results && Array.isArray(data.data.results)) {
+            for (const r of data.data.results as MoilResult[]) {
+              moilResultByEmail.set(r.email, r);
             }
           }
         }
-      } catch (externalError) {
-        console.error('Error checking external license status:', externalError);
-        // Continue with normal flow if external check fails
+      }
+    } catch (err) {
+      console.error('Moil activate_license batch call failed (non-fatal):', err);
+    }
+
+    // Bucket emails by outcome for targeted email dispatch.
+    const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/login`;
+    const adminName = `${adminData.first_name} ${adminData.last_name}`;
+
+    const toActivationEmail: Array<{ email: string; licenseId: string; activationUrl: string }> = [];
+    const toClaimEmail: Array<{ email: string; loginUrl: string; partnerName: string; edc: EdcEmailInfo }> = [];
+    const toActivatedEmail: Array<{ email: string; loginUrl: string; partnerName: string; planName: string; edc: EdcEmailInfo }> = [];
+    const alreadyHandled = new Set<string>();
+
+    for (const email of newEmails) {
+      const moil = moilResultByEmail.get(email);
+      const licenseId = licenseByEmail.get(email)?.id;
+      if (!licenseId) continue;
+
+      const status = moil?.license_status;
+
+      if (status === 'activated') {
+        toActivatedEmail.push({ email, loginUrl, partnerName, planName: PARTNER_PLAN_DISPLAY, edc: edcInfo });
+        alreadyHandled.add(email);
+      } else if (status === 'pending_invite' && moil?.has_account === true) {
+        toClaimEmail.push({ email, loginUrl, partnerName, edc: edcInfo });
+        alreadyHandled.add(email);
+      } else if (status === 'already_assigned' || status === 'blocked_downgrade') {
+        alreadyHandled.add(email);
+      } else {
+        // No Moil account or call failed → standard activation email
+        toActivationEmail.push({
+          email,
+          licenseId,
+          activationUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/register?licenseId=${licenseId}&ref=moilPartners&org=${orgSlug}`,
+        });
       }
     }
 
-    // Mark already-activated licenses in Supabase
-    const activatedEmails = [...emailsToSkipActivation];
-    if (activatedEmails.length > 0) {
+    // Mark already-active licenses in Supabase
+    const immediatelyActive = [...alreadyHandled].filter((e) => {
+      const s = moilResultByEmail.get(e)?.license_status;
+      return s === 'activated' || s === 'already_assigned' || s === 'blocked_downgrade';
+    });
+    if (immediatelyActive.length > 0) {
       await supabase
         .from('licenses')
         .update({ is_activated: true, email_status: 'skipped', activated_at: new Date().toISOString() })
-        .in('id', activatedEmails.map(e => licenseIdByEmail.get(e)).filter(Boolean) as string[]);
+        .in('id', immediatelyActive.map((e) => licenseByEmail.get(e)?.id).filter(Boolean) as string[]);
     }
 
-    // Prepare batch email data with dynamic partner org name, excluding already-activated licenses
-    const emailBatch = (insertedLicenses || [])
-      .filter(license => !emailsToSkipActivation.has(license.email))
-      .map(license => ({
-        email: license.email,
-        licenseId: license.id,
-        activationUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/register?licenseId=${license.id}&ref=moilPartners&org=${orgSlug}`,
-      }));
+    // Dispatch emails in parallel (each batch respects the queue rate limit internally)
+    const [activationResults, claimResults, activatedResults] = await Promise.all([
+      toActivationEmail.length > 0
+        ? sendBatchLicenseActivationEmails({ licenses: toActivationEmail, adminName, adminEmail: adminData.email, edc: edcInfo })
+        : Promise.resolve({ results: [], sent: 0, failed: 0 }),
+      toClaimEmail.length > 0
+        ? sendBatchLicenseClaimEmails(toClaimEmail)
+        : Promise.resolve({ results: [], sent: 0, failed: 0 }),
+      toActivatedEmail.length > 0
+        ? sendBatchLicenseActivatedEmails(toActivatedEmail)
+        : Promise.resolve({ results: [], sent: 0, failed: 0 }),
+    ]);
 
-    // Send batch emails with partner branding (only for licenses that need activation)
-    const emailResults = emailBatch.length > 0 ? await sendBatchLicenseActivationEmails({
-      licenses: emailBatch,
-      adminName: `${adminData.first_name} ${adminData.last_name}`,
-      adminEmail: adminData.email,
-      edc: edcInfo,
-    }) : { results: [], sent: 0, failed: 0 };
+    // Persist email tracking for all sent emails
+    const allEmailResults = [
+      ...activationResults.results.map((r) => ({ ...r, licenseId: licenseByEmail.get(r.email)?.id })),
+      ...claimResults.results.map((r) => ({ ...r, licenseId: licenseByEmail.get(r.email)?.id })),
+      ...activatedResults.results.map((r) => ({ ...r, licenseId: licenseByEmail.get(r.email)?.id })),
+    ];
 
-    // Update message_id and email_status for each license based on results
-    if (emailResults.results && Array.isArray(emailResults.results) && emailResults.results.length > 0) {
+    if (allEmailResults.length > 0) {
       await Promise.all(
-        emailResults.results.map(async (result) => {
-          if (result.success && result.messageId) {
-            await supabase
-              .from('licenses')
-              .update({
-                message_id: result.messageId,
-                email_status: 'sent',
-              })
-              .eq('id', result.licenseId);
-          } else {
-            await supabase
-              .from('licenses')
-              .update({
-                email_status: 'failed',
-              })
-              .eq('id', result.licenseId);
-          }
-        })
-      );
-    } else if (insertedLicenses && insertedLicenses.length > 0) {
-      // If no results returned, mark all inserted licenses as failed
-      await Promise.all(
-        insertedLicenses.map(async (license) => {
+        allEmailResults.map(async (r) => {
+          if (!r.licenseId) return;
           await supabase
             .from('licenses')
             .update({
-              email_status: 'failed',
+              email_status: r.success ? 'sent' : 'failed',
+              ...(r.success && r.messageId ? { message_id: r.messageId } : {}),
             })
-            .eq('id', license.id);
+            .eq('id', r.licenseId);
         })
       );
     }
 
-    const results = {
-      success: insertedLicenses?.length || 0,
-      failed: existingEmails.length + invalidEmails.length,
-      emailsSent: emailResults.sent,
-      emailsFailed: emailResults.failed,
-      errors: [
-        ...invalidEmails.map(email => `Invalid email format: ${email}`),
-        ...existingEmails.map(email => `License already exists for: ${email}`)
-      ],
-      licenses: (insertedLicenses || []).map(license => ({
-        id: license.id,
-        email: license.email,
-        isActivated: license.is_activated,
-        createdAt: license.created_at,
-      })),
-    };
-
-    // Log activity
-    if (teamMember?.team_id && results.success > 0) {
+    if (teamMember?.team_id && (insertedLicenses?.length ?? 0) > 0) {
       await supabase.rpc('log_activity', {
         p_team_id: teamMember.team_id,
         p_admin_id: user.id,
         p_activity_type: 'license_added',
-        p_description: `Added ${results.success} license${results.success > 1 ? 's' : ''}`,
-        p_metadata: { 
-          count: results.success,
-          emails_sent: results.emailsSent 
-        }
+        p_description: `Added ${insertedLicenses!.length} license(s)`,
+        p_metadata: { count: insertedLicenses!.length },
       });
     }
 
+    const totalEmailsSent = activationResults.sent + claimResults.sent + activatedResults.sent;
+
     return NextResponse.json(
-      { 
-        message: `Processed ${emails.length} emails: ${results.success} licenses added, ${results.emailsSent} emails sent, ${results.failed} failed`,
-        results,
+      {
+        message: `Processed ${emails.length} emails: ${insertedLicenses?.length || 0} licenses added, ${totalEmailsSent} emails sent, ${existingEmails.length + invalidEmails.length} failed`,
+        results: {
+          success: insertedLicenses?.length || 0,
+          failed: existingEmails.length + invalidEmails.length,
+          emailsSent: totalEmailsSent,
+          errors: [
+            ...invalidEmails.map((e: string) => `Invalid email format: ${e}`),
+            ...existingEmails.map((e: string) => `License already exists for: ${e}`),
+          ],
+          licenses: ((insertedLicenses || []) as InsertedLicense[]).map((l) => ({
+            id: l.id,
+            email: l.email,
+            moilStatus: moilResultByEmail.get(l.email)?.license_status || 'pending',
+            createdAt: l.created_at,
+          })),
+        },
       },
       { status: 200 }
     );
   } catch (error) {
     console.error('Add multiple licenses error:', error);
-    return NextResponse.json(
-      { error: 'An unexpected error occurred' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'An unexpected error occurred' }, { status: 500 });
   }
 }
