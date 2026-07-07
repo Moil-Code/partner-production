@@ -41,7 +41,10 @@ import {
   Users2,
   LayoutDashboard,
   Activity,
-  X
+  X,
+  Edit2,
+  Check,
+  Trash2
 } from 'lucide-react';
 
 interface Partner {
@@ -101,6 +104,12 @@ export default function MoilAdminDashboard() {
   };
   const [licenses, setLicenses] = React.useState<any[]>([]);
   const [licensesLoading, setLicensesLoading] = React.useState(false);
+
+  // Inline license edit / delete state
+  const [editingLicenseId, setEditingLicenseId] = React.useState<string | null>(null);
+  const [editingEmail, setEditingEmail] = React.useState('');
+  const [updatingEmail, setUpdatingEmail] = React.useState(false);
+  const [processingLicenseId, setProcessingLicenseId] = React.useState<string | null>(null);
   
   // Confirmation modal state
   const [confirmModal, setConfirmModal] = React.useState<{
@@ -403,6 +412,106 @@ export default function MoilAdminDashboard() {
       });
     } finally {
       setAddingLicense(false);
+    }
+  };
+
+  const handleEditEmail = (license: any) => {
+    setEditingLicenseId(license.id);
+    setEditingEmail(license.email);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingLicenseId(null);
+    setEditingEmail('');
+  };
+
+  const handleSaveEmail = async (licenseId: string) => {
+    const emailRegex = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
+    if (!emailRegex.test(editingEmail.trim())) {
+      toast({
+        title: 'Invalid Email',
+        description: 'Please enter a valid email address',
+        type: 'error',
+      });
+      return;
+    }
+
+    setUpdatingEmail(true);
+    try {
+      const response = await fetch('/api/licenses/update-email', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ licenseId, newEmail: editingEmail.trim().toLowerCase() }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to update email');
+      }
+
+      toast({
+        title: 'Success',
+        description: 'License email updated successfully',
+        type: 'success',
+      });
+
+      setEditingLicenseId(null);
+      setEditingEmail('');
+      fetchLicenses();
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to update email',
+        type: 'error',
+      });
+    } finally {
+      setUpdatingEmail(false);
+    }
+  };
+
+  const handleDeleteLicense = (license: any) => {
+    setConfirmModal({
+      isOpen: true,
+      title: 'Delete License',
+      description: `Are you sure you want to delete the license for ${license.email}? This action cannot be undone.`,
+      confirmText: 'Delete',
+      variant: 'danger',
+      onConfirm: () => executeDeleteLicense(license),
+    });
+  };
+
+  const executeDeleteLicense = async (license: any) => {
+    setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+    setProcessingLicenseId(license.id);
+    try {
+      const response = await fetch('/api/licenses/delete', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ licenseId: license.id }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to delete license');
+      }
+
+      toast({
+        title: 'License Deleted',
+        description: `License for ${license.email} deleted successfully`,
+        type: 'success',
+      });
+
+      fetchLicenses();
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to delete license',
+        type: 'error',
+      });
+    } finally {
+      setProcessingLicenseId(null);
     }
   };
 
@@ -1040,13 +1149,45 @@ export default function MoilAdminDashboard() {
                           <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Status</th>
                           <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Created</th>
                           <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Activated</th>
+                          <th className="text-right py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
                         {licenses.map((license) => (
                           <tr key={license.id} className="border-b border-[var(--border)] hover:bg-[var(--surface-subtle)] transition-colors">
                             <td className="py-4 px-4">
-                              <p className="font-medium text-[var(--text-primary)]">{license.email}</p>
+                              {editingLicenseId === license.id ? (
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="email"
+                                    value={editingEmail}
+                                    onChange={(e) => setEditingEmail(e.target.value)}
+                                    className="px-2 py-1 bg-[var(--surface-subtle)] border border-[var(--primary)] rounded text-sm focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/20 text-[var(--text-primary)] w-full min-w-[200px]"
+                                    autoFocus
+                                    disabled={updatingEmail}
+                                  />
+                                  <div className="flex gap-1">
+                                    <button
+                                      onClick={() => handleSaveEmail(license.id)}
+                                      disabled={updatingEmail}
+                                      className="p-1 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded transition-colors disabled:opacity-50"
+                                      title="Save"
+                                    >
+                                      {updatingEmail ? <Spinner size="sm" className="w-3.5 h-3.5" /> : <Check className="w-4 h-4" />}
+                                    </button>
+                                    <button
+                                      onClick={handleCancelEdit}
+                                      disabled={updatingEmail}
+                                      className="p-1 text-[var(--text-tertiary)] hover:bg-[var(--surface-subtle)] rounded transition-colors disabled:opacity-50"
+                                      title="Cancel"
+                                    >
+                                      <X className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <p className="font-medium text-[var(--text-primary)]">{license.email}</p>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-[var(--text-secondary)]">
                               {license.business_name || '-'}
@@ -1075,6 +1216,30 @@ export default function MoilAdminDashboard() {
                             </td>
                             <td className="py-4 px-4 text-[var(--text-secondary)] text-sm">
                               {license.activated_at ? new Date(license.activated_at).toLocaleDateString() : '-'}
+                            </td>
+                            <td className="py-4 px-4 text-right">
+                              {license.is_activated ? (
+                                <span className="text-xs text-[var(--text-tertiary)]">—</span>
+                              ) : (
+                                <div className="flex items-center justify-end gap-1">
+                                  <button
+                                    onClick={() => handleEditEmail(license)}
+                                    disabled={editingLicenseId === license.id || processingLicenseId === license.id}
+                                    className="p-2 text-[var(--text-tertiary)] hover:text-[var(--primary)] hover:bg-[var(--primary)]/10 rounded-lg transition-colors disabled:opacity-50"
+                                    title="Edit email"
+                                  >
+                                    <Edit2 className="w-4 h-4" />
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeleteLicense(license)}
+                                    disabled={processingLicenseId === license.id || editingLicenseId === license.id}
+                                    className="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors disabled:opacity-50"
+                                    title="Delete license"
+                                  >
+                                    {processingLicenseId === license.id ? <Spinner size="sm" className="w-4 h-4" /> : <Trash2 className="w-4 h-4" />}
+                                  </button>
+                                </div>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -1239,7 +1404,7 @@ export default function MoilAdminDashboard() {
         description={confirmModal.description}
         confirmText={confirmModal.confirmText}
         variant={confirmModal.variant}
-        isLoading={updatingStatus !== null}
+        isLoading={updatingStatus !== null || processingLicenseId !== null}
       />
     </div>
   );
