@@ -11,12 +11,14 @@ This document describes the public API endpoints that can be called by external 
 1. [Verify License](#1-verify-license)
 2. [Activate License](#2-activate-license)
 3. [Purchase Licenses](#3-purchase-licenses)
+4. [API Key](#api-key)
+5. [License Plan Metadata Columns](#license-plan-metadata-columns)
 
 ---
 
 ## 1. Verify License
 
-Verify if a license ID is valid and exists in the system.
+Verify if a license ID is valid and exists in the system, and whether the issuing partner organization is valid and active.
 
 ### Endpoint
 
@@ -26,18 +28,20 @@ GET /api/licenses/verify
 
 ### Authentication
 
-**None required** - This is a public endpoint.
+**Optional API key** - When the server has `PARTNER_SERVICE_API_KEY` configured, requests must include a matching `x-partner-api-key` header (see [API Key](#api-key)). When the env var is not configured, no authentication is required.
 
 ### Query Parameters
 
 | Parameter   | Type   | Required | Description                    |
 |-------------|--------|----------|--------------------------------|
 | `licenseId` | string | Yes      | The UUID of the license to verify |
+| `orgSlug`   | string | Yes      | URL-safe partner organization slug (partner name with spaces replaced by hyphens, e.g. `nerds-labs`). The special value `moil-partner` always passes partner verification (Moil-created licenses). |
 
 ### Example Request
 
 ```bash
-curl -X GET "https://your-domain.com/api/licenses/verify?licenseId=550e8400-e29b-41d4-a716-446655440000"
+curl -X GET "https://your-domain.com/api/licenses/verify?licenseId=550e8400-e29b-41d4-a716-446655440000&orgSlug=nerds-labs" \
+  -H "x-partner-api-key: YOUR_API_KEY"
 ```
 
 ### Success Response
@@ -47,18 +51,42 @@ curl -X GET "https://your-domain.com/api/licenses/verify?licenseId=550e8400-e29b
 ```json
 {
   "success": true,
-  "verified": true
+  "verified": true,
+  "partnerVerified": true
 }
 ```
 
+`verified` reflects whether the license exists; `partnerVerified` reflects whether `orgSlug` resolves to an active partner.
+
 ### Error Responses
+
+**Status Code:** `400 Bad Request` - Missing parameters
+
+```json
+{
+  "error": "License ID and Organization Slug are required",
+  "verified": false,
+  "partnerVerified": false
+}
+```
+
+**Status Code:** `401 Unauthorized` - Invalid API key (only when `PARTNER_SERVICE_API_KEY` is configured)
+
+```json
+{
+  "error": "Invalid API key",
+  "verified": false,
+  "partnerVerified": false
+}
+```
 
 **Status Code:** `500 Internal Server Error`
 
 ```json
 {
-  "error": "Failed to fetch licenses",
-  "details": "Error message details"
+  "success": false,
+  "verified": false,
+  "partnerVerified": false
 }
 ```
 
@@ -76,12 +104,13 @@ POST /api/licenses/activate
 
 ### Authentication
 
-**None required** - This is a public endpoint.
+**Optional API key** - When the server has `PARTNER_SERVICE_API_KEY` configured, requests must include a matching `x-partner-api-key` header (see [API Key](#api-key)). When the env var is not configured, no authentication is required.
 
 ### Request Headers
 
 ```
 Content-Type: application/json
+x-partner-api-key: YOUR_API_KEY   (only when PARTNER_SERVICE_API_KEY is configured)
 ```
 
 ### Request Body
@@ -91,16 +120,25 @@ Content-Type: application/json
 | `licenseId`    | string | Yes      | The UUID of the license to activate   |
 | `businessName` | string | Yes      | Name of the business                  |
 | `businessType` | string | Yes      | Type/category of the business         |
+| `moilUserId`   | string | No       | Moil (MongoDB) user id of the license holder — stored as the cross-platform join key |
+| `plan`         | string | No       | Resolved Moil plan key, e.g. `standard_yearly` or `professional_monthly`. Parsed into plan tier + billing cycle |
+| `planTier`     | string | No       | Explicit plan tier (`standard` \| `professional` \| `market_pro`). Wins over `plan` when both are sent |
+| `billingCycle` | string | No       | Explicit billing cycle (`yearly` \| `monthly`). Wins over `plan` when both are sent |
+| `expiresAt`    | string | No       | ISO 8601 date when the granted plan expires |
 
 ### Example Request
 
 ```bash
 curl -X POST "https://your-domain.com/api/licenses/activate" \
   -H "Content-Type: application/json" \
+  -H "x-partner-api-key: YOUR_API_KEY" \
   -d '{
     "licenseId": "550e8400-e29b-41d4-a716-446655440000",
     "businessName": "Acme Corporation",
-    "businessType": "Technology"
+    "businessType": "Technology",
+    "moilUserId": "665f1a2b3c4d5e6f7a8b9c0d",
+    "plan": "standard_yearly",
+    "expiresAt": "2027-07-12T00:00:00.000Z"
   }'
 ```
 
@@ -118,12 +156,24 @@ curl -X POST "https://your-domain.com/api/licenses/activate" \
     "business_name": "Acme Corporation",
     "business_type": "Technology",
     "is_activated": true,
-    "activated_at": "2024-12-22T08:00:00.000Z"
+    "activated_at": "2024-12-22T08:00:00.000Z",
+    "plan_tier": "standard",
+    "billing_cycle": "yearly",
+    "expires_at": "2027-07-12T00:00:00.000Z",
+    "moil_user_id": "665f1a2b3c4d5e6f7a8b9c0d"
   }
 }
 ```
 
 ### Error Responses
+
+**Status Code:** `401 Unauthorized` - Invalid API key (only when `PARTNER_SERVICE_API_KEY` is configured)
+
+```json
+{
+  "error": "Invalid API key"
+}
+```
 
 **Status Code:** `400 Bad Request` - Missing required fields
 
@@ -161,7 +211,9 @@ curl -X POST "https://your-domain.com/api/licenses/activate" \
 
 ## 3. Purchase Licenses
 
-Update the purchased license count for an admin. This endpoint is typically called after a successful payment to add licenses to an admin's account.
+Update the purchased license count for a **team**. This endpoint is typically called after a successful payment to add licenses. License counts are stored at the team level — the endpoint accepts either a `teamId` directly, or an `adminId` (in which case the admin's team is resolved).
+
+The route also exposes a `GET` handler used by the Stripe payment redirect flow (`?licenseCount=&payment=successful&paymentType=license_purchase`); that variant requires an authenticated browser session and redirects to the dashboard.
 
 ### Endpoint
 
@@ -171,7 +223,7 @@ POST /api/licenses/purchase
 
 ### Authentication
 
-**None required** - This is a public endpoint (should be called from trusted payment provider).
+**None required** - This is a public endpoint (should be called from trusted payment provider). The optional `x-partner-api-key` check does **not** apply to this endpoint.
 
 ### Request Headers
 
@@ -183,8 +235,11 @@ Content-Type: application/json
 
 | Field          | Type           | Required | Description                              |
 |----------------|----------------|----------|------------------------------------------|
-| `adminId`      | string         | Yes      | The UUID of the admin account            |
+| `teamId`       | string         | Yes*     | The UUID of the team to credit           |
+| `adminId`      | string         | Yes*     | The UUID of an admin account — used to resolve the team when `teamId` is not sent |
 | `licenseCount` | number/string  | Yes      | Number of licenses to add (must be >= 1) |
+
+\* At least one of `teamId` or `adminId` is required. When both are sent, `teamId` wins.
 
 ### Example Request
 
@@ -204,8 +259,8 @@ curl -X POST "https://your-domain.com/api/licenses/purchase" \
 ```json
 {
   "success": true,
-  "message": "License count updated successfully",
-  "admin_id": "123e4567-e89b-12d3-a456-426614174000",
+  "message": "Team license count updated successfully",
+  "team_id": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
   "licenses_added": 10,
   "total_licenses": 25
 }
@@ -217,7 +272,7 @@ curl -X POST "https://your-domain.com/api/licenses/purchase" \
 
 ```json
 {
-  "error": "Missing required parameters: adminId and licenseCount"
+  "error": "Missing required parameters: (adminId or teamId) and licenseCount"
 }
 ```
 
@@ -229,11 +284,19 @@ curl -X POST "https://your-domain.com/api/licenses/purchase" \
 }
 ```
 
-**Status Code:** `404 Not Found` - Admin not found
+**Status Code:** `404 Not Found` - Admin is not in a team (when resolving via `adminId`)
 
 ```json
 {
-  "error": "Admin not found"
+  "error": "Admin is not in a team"
+}
+```
+
+**Status Code:** `404 Not Found` - Team not found
+
+```json
+{
+  "error": "Team not found"
 }
 ```
 
@@ -244,6 +307,30 @@ curl -X POST "https://your-domain.com/api/licenses/purchase" \
   "error": "Failed to update license count"
 }
 ```
+
+---
+
+## API Key
+
+The `verify` and `activate` endpoints support an optional shared-secret check:
+
+- When the server has the `PARTNER_SERVICE_API_KEY` environment variable set, every request to those endpoints must include an `x-partner-api-key` header whose value equals the configured key. Requests without it (or with a wrong value) receive `401 Unauthorized`.
+- When the env var is **not** set, the check is skipped entirely — existing callers keep working (safe rollout).
+- The `purchase` endpoint is intentionally excluded (it is called by payment redirects).
+
+---
+
+## License Plan Metadata Columns
+
+Licenses carry the following optional plan metadata (populated from the Moil backend at creation/activation time; all nullable):
+
+| Column          | Type        | Description                                                        |
+|-----------------|-------------|--------------------------------------------------------------------|
+| `plan_tier`     | text        | `standard` \| `professional` \| `market_pro`                       |
+| `billing_cycle` | text        | `yearly` \| `monthly`                                              |
+| `months`        | integer     | Duration in months (1-12) when billing cycle is monthly            |
+| `expires_at`    | timestamptz | When the granted plan expires, as reported by the Moil backend     |
+| `moil_user_id`  | text        | Moil (MongoDB) user id — the stable cross-platform join key (indexed) |
 
 ---
 
@@ -270,11 +357,11 @@ All endpoints return errors in the following format:
 
 ## Typical Flow
 
-1. **Admin purchases licenses** → Payment provider calls `/api/licenses/purchase` to add licenses to admin's account
+1. **Admin purchases licenses** → Payment provider calls `/api/licenses/purchase` to add licenses to the admin's team
 2. **Admin creates license** → Admin dashboard creates a license for a user email (internal)
 3. **User receives email** → User gets activation email with link containing `licenseId`
-4. **Mobile app verifies license** → App calls `/api/licenses/verify?licenseId=xxx` to check validity
-5. **User activates license** → App calls `/api/licenses/activate` with business info to activate
+4. **Mobile app verifies license** → App calls `/api/licenses/verify?licenseId=xxx&orgSlug=xxx` to check validity
+5. **User activates license** → App calls `/api/licenses/activate` with business info (plus optional plan metadata) to activate
 
 ---
 

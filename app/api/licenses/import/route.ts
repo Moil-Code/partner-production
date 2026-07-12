@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { sendBatchLicenseActivationEmails } from '@/lib/email';
-import { parseLicensePlanDefaults } from '@/lib/licensePlanDefaults';
+import {
+  parseLicensePlanDefaults,
+  parsePlanKey,
+  type LicensePlanDefaults,
+} from '@/lib/licensePlanDefaults';
 
 export async function POST(request: Request) {
   try {
@@ -169,6 +173,16 @@ export async function POST(request: Request) {
     // defaults. Partner CSV import doesn't, so this whole block is skipped
     // and we never communicate with the external endpoint.
     const emailsToSkipActivation = new Set<string>();
+    type MoilResult = {
+      email: string;
+      license_status: string;
+      // Optional fields — newer Moil backend versions include these.
+      plan?: string;
+      expiresAt?: string;
+      moil_user_id?: string;
+    };
+    const moilResultByEmail = new Map<string, MoilResult>();
+    let planDefaults: LicensePlanDefaults | null = null;
     if (planFromForm !== null && planFromForm !== '') {
       const planParse = parseLicensePlanDefaults({
         plan: planFromForm,
@@ -178,7 +192,7 @@ export async function POST(request: Request) {
       if (!planParse.ok) {
         return NextResponse.json({ error: planParse.error }, { status: 400 });
       }
-      const planDefaults = planParse.defaults;
+      planDefaults = planParse.defaults;
 
       try {
         if (process.env.NEXT_PUBLIC_QC_API_KEY && newEmails.length > 0) {
@@ -195,7 +209,10 @@ export async function POST(request: Request) {
             const externalData = await externalResponse.json();
             // Check results for activated licenses
             if (externalData.data?.results && Array.isArray(externalData.data.results)) {
-              externalData.data.results.forEach((result: any) => {
+              (externalData.data.results as MoilResult[]).forEach((result) => {
+                if (result.email) {
+                  moilResultByEmail.set(result.email.toLowerCase(), result);
+                }
                 if (result.license_status === 'activated') {
                   emailsToSkipActivation.add(result.email);
                 }
@@ -210,15 +227,27 @@ export async function POST(request: Request) {
     }
 
     // Insert all new licenses in batch
-    const licensesToInsert = newEmails.map(email => ({
-      email: email.toLowerCase(),
-      admin_id: user.id,
-      business_name: '',
-      business_type: '',
-      is_activated: emailsToSkipActivation.has(email), // Mark as activated if already activated externally
-      team_id: teamId || null,
-      performed_by: user.id,
-    }));
+    const licensesToInsert = newEmails.map(email => {
+      const moil = moilResultByEmail.get(email.toLowerCase());
+      const resolvedPlan = parsePlanKey(moil?.plan);
+      return {
+        email: email.toLowerCase(),
+        admin_id: user.id,
+        business_name: '',
+        business_type: '',
+        is_activated: emailsToSkipActivation.has(email), // Mark as activated if already activated externally
+        team_id: teamId || null,
+        performed_by: user.id,
+        // Plan metadata: prefer the plan the Moil backend resolved for this
+        // email; fall back to the defaults the caller sent to Moil (null when
+        // the partner CSV import runs without plan params).
+        plan_tier: resolvedPlan?.planTier ?? planDefaults?.plan ?? null,
+        billing_cycle: resolvedPlan?.billingCycle ?? planDefaults?.billingCycle ?? null,
+        months: planDefaults?.months ?? null,
+        moil_user_id: moil?.moil_user_id ?? null,
+        expires_at: moil?.expiresAt ?? null,
+      };
+    });
 
     const { data: insertedLicenses, error: insertError } = await supabase
       .from('licenses')

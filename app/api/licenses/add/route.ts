@@ -6,6 +6,7 @@ import {
   sendLicenseActivatedEmail,
   type EdcEmailInfo,
 } from '@/lib/email';
+import { parsePlanKey } from '@/lib/licensePlanDefaults';
 
 // All partner-issued licenses grant exactly this plan.
 const PARTNER_PLAN_DEFAULTS = { plan: 'standard', billingCycle: 'yearly' };
@@ -114,6 +115,9 @@ export async function POST(request: Request) {
         is_activated: false,
         team_id: teamId || null,
         performed_by: user.id,
+        plan_tier: PARTNER_PLAN_DEFAULTS.plan,
+        billing_cycle: PARTNER_PLAN_DEFAULTS.billingCycle,
+        months: null,
       })
       .select()
       .single();
@@ -126,7 +130,14 @@ export async function POST(request: Request) {
     // Call the Moil backend to grant / upgrade the standard_yearly plan.
     // The licenseId lets the backend back-fill business_name/type for
     // already-registered users. source tracks which partner issued the license.
-    type MoilResult = { license_status: string; has_account?: boolean };
+    type MoilResult = {
+      license_status: string;
+      has_account?: boolean;
+      // Optional fields — newer Moil backend versions include these.
+      plan?: string;
+      expiresAt?: string;
+      moil_user_id?: string;
+    };
     let moilResult: MoilResult | null = null;
 
     try {
@@ -157,6 +168,25 @@ export async function POST(request: Request) {
       }
     } catch (err) {
       console.error('Moil activate_license call failed (non-fatal):', err);
+    }
+
+    // Persist optional Moil-reported metadata (moil_user_id / expiry / resolved plan).
+    if (moilResult?.moil_user_id || moilResult?.expiresAt || moilResult?.plan) {
+      const resolvedPlan = parsePlanKey(moilResult.plan);
+      const metadataUpdate: Record<string, string> = {
+        ...(moilResult.moil_user_id ? { moil_user_id: moilResult.moil_user_id } : {}),
+        ...(moilResult.expiresAt ? { expires_at: moilResult.expiresAt } : {}),
+        ...(resolvedPlan
+          ? { plan_tier: resolvedPlan.planTier, billing_cycle: resolvedPlan.billingCycle }
+          : {}),
+      };
+      const { error: metadataError } = await supabase
+        .from('licenses')
+        .update(metadataUpdate)
+        .eq('id', license.id);
+      if (metadataError) {
+        console.error('Failed to persist Moil license metadata (non-fatal):', metadataError);
+      }
     }
 
     const status = moilResult?.license_status;

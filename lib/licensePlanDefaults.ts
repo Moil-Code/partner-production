@@ -26,6 +26,28 @@ export type ParseResult =
  *   - if billingCycle === 'monthly', months is required (1..MAX_MONTHS)
  *   - if billingCycle === 'yearly', months is dropped from the result
  */
+/**
+ * Parse a resolved Moil plan key like 'standard_yearly' or
+ * 'market_pro_monthly' into { planTier, billingCycle }.
+ * Returns null when the key doesn't match a known tier + cycle.
+ */
+export function parsePlanKey(
+  planKey: unknown
+): { planTier: LicensePlan; billingCycle: BillingCycle } | null {
+  if (typeof planKey !== 'string' || !planKey) return null;
+  const normalized = planKey.trim().toLowerCase();
+  for (const cycle of BILLING_CYCLES) {
+    const suffix = `_${cycle}`;
+    if (normalized.endsWith(suffix)) {
+      const tier = normalized.slice(0, -suffix.length);
+      if (LICENSE_PLANS.includes(tier as LicensePlan)) {
+        return { planTier: tier as LicensePlan, billingCycle: cycle };
+      }
+    }
+  }
+  return null;
+}
+
 export function parseLicensePlanDefaults(input: unknown): ParseResult {
   if (!input || typeof input !== 'object') {
     return { ok: false, error: 'Plan defaults are required' };

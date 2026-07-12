@@ -12,16 +12,22 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Verify user is an admin
+    // Verify user is an admin (and fetch partner for the export filename)
     const { data: admin, error: adminError } = await supabase
       .from('admins')
-      .select('id')
+      .select('id, partner:partners(name, program_name, domain)')
       .eq('id', user.id)
       .single();
 
     if (adminError || !admin) {
       return NextResponse.json({ error: 'Admin access required' }, { status: 403 });
     }
+
+    const partnerInfo = admin.partner as unknown as {
+      name?: string;
+      program_name?: string;
+      domain?: string;
+    } | null;
 
     // Get user's team
     const { data: teamMember } = await supabase
@@ -51,10 +57,13 @@ export async function GET(request: Request) {
     }
 
     // Generate CSV
-    const headers = ['Email', 'Status', 'Date Added', 'Activated At'];
+    const headers = ['Email', 'Status', 'Plan Tier', 'Billing Cycle', 'Expires', 'Date Added', 'Activated At'];
     const rows = licenses.map(license => [
       license.email,
       license.is_activated ? 'Active' : 'Pending',
+      license.plan_tier || 'N/A',
+      license.billing_cycle || 'N/A',
+      license.expires_at ? new Date(license.expires_at).toLocaleDateString() : 'N/A',
       new Date(license.created_at).toLocaleDateString(),
       license.activated_at ? new Date(license.activated_at).toLocaleDateString() : 'N/A',
     ]);
@@ -64,11 +73,21 @@ export async function GET(request: Request) {
       ...rows.map(row => row.join(',')),
     ].join('\n');
 
+    // Derive filename from the caller's partner, falling back to a generic name.
+    const partnerLabel = partnerInfo?.name || partnerInfo?.program_name || partnerInfo?.domain;
+    const partnerSlug = partnerLabel
+      ? partnerLabel
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '')
+      : '';
+    const filename = `${partnerSlug || 'moil-partner'}-licenses-${new Date().toISOString().split('T')[0]}.csv`;
+
     return new NextResponse(csv, {
       status: 200,
       headers: {
         'Content-Type': 'text/csv',
-        'Content-Disposition': `attachment; filename="queen-creek-chamber-licenses-${new Date().toISOString().split('T')[0]}.csv"`,
+        'Content-Disposition': `attachment; filename="${filename}"`,
       },
     });
 

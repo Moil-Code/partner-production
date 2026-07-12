@@ -6,6 +6,7 @@ import {
   sendBatchLicenseActivatedEmails,
   type EdcEmailInfo,
 } from '@/lib/email';
+import { parsePlanKey } from '@/lib/licensePlanDefaults';
 
 // All partner-issued licenses grant exactly this plan.
 const PARTNER_PLAN_DEFAULTS = { plan: 'standard', billingCycle: 'yearly' };
@@ -156,6 +157,9 @@ export async function POST(request: Request) {
           is_activated: false,
           team_id: teamId || null,
           performed_by: user.id,
+          plan_tier: PARTNER_PLAN_DEFAULTS.plan,
+          billing_cycle: PARTNER_PLAN_DEFAULTS.billingCycle,
+          months: null,
         }))
       )
       .select();
@@ -171,7 +175,15 @@ export async function POST(request: Request) {
     );
 
     // Call Moil backend once for the entire batch.
-    type MoilResult = { email: string; license_status: string; has_account?: boolean };
+    type MoilResult = {
+      email: string;
+      license_status: string;
+      has_account?: boolean;
+      // Optional fields — newer Moil backend versions include these.
+      plan?: string;
+      expiresAt?: string;
+      moil_user_id?: string;
+    };
     const moilResultByEmail = new Map<string, MoilResult>();
 
     try {
@@ -207,6 +219,39 @@ export async function POST(request: Request) {
       }
     } catch (err) {
       console.error('Moil activate_license batch call failed (non-fatal):', err);
+    }
+
+    // Persist optional Moil-reported metadata (moil_user_id / expiry / resolved plan).
+    const metadataUpdates = newEmails
+      .map((email) => {
+        const moil = moilResultByEmail.get(email);
+        const licenseId = licenseByEmail.get(email)?.id;
+        if (!moil || !licenseId) return null;
+        if (!moil.moil_user_id && !moil.expiresAt && !moil.plan) return null;
+        const resolvedPlan = parsePlanKey(moil.plan);
+        const update: Record<string, string> = {
+          ...(moil.moil_user_id ? { moil_user_id: moil.moil_user_id } : {}),
+          ...(moil.expiresAt ? { expires_at: moil.expiresAt } : {}),
+          ...(resolvedPlan
+            ? { plan_tier: resolvedPlan.planTier, billing_cycle: resolvedPlan.billingCycle }
+            : {}),
+        };
+        return { licenseId, update };
+      })
+      .filter((u): u is { licenseId: string; update: Record<string, string> } => u !== null);
+
+    if (metadataUpdates.length > 0) {
+      await Promise.all(
+        metadataUpdates.map(async ({ licenseId, update }) => {
+          const { error: metadataError } = await supabase
+            .from('licenses')
+            .update(update)
+            .eq('id', licenseId);
+          if (metadataError) {
+            console.error('Failed to persist Moil license metadata (non-fatal):', metadataError);
+          }
+        })
+      );
     }
 
     // Bucket emails by outcome for targeted email dispatch.

@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS public.admins (
   partner_id UUID REFERENCES public.partners(id) ON DELETE SET NULL,
   global_role admin_role DEFAULT 'member' NOT NULL,
   purchased_license_count INTEGER DEFAULT 0 NOT NULL,
+  active_purchased_license_count INTEGER DEFAULT 0,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
 );
@@ -163,7 +164,14 @@ CREATE TABLE IF NOT EXISTS public.licenses (
   -- Activation status
   is_activated BOOLEAN DEFAULT FALSE NOT NULL,
   activated_at TIMESTAMP WITH TIME ZONE,
-  
+
+  -- Plan metadata (reported by / synced with the Moil backend)
+  plan_tier TEXT CHECK (plan_tier IS NULL OR plan_tier IN ('standard', 'professional', 'market_pro')),
+  billing_cycle TEXT CHECK (billing_cycle IS NULL OR billing_cycle IN ('yearly', 'monthly')),
+  months INTEGER CHECK (months IS NULL OR (months >= 1 AND months <= 12)),
+  expires_at TIMESTAMP WITH TIME ZONE,
+  moil_user_id TEXT,
+
   -- Email tracking
   message_id TEXT,
   email_status TEXT DEFAULT 'pending',
@@ -265,6 +273,8 @@ CREATE INDEX IF NOT EXISTS idx_licenses_partner_id ON public.licenses(partner_id
 CREATE INDEX IF NOT EXISTS idx_licenses_email ON public.licenses(lower(email));
 CREATE INDEX IF NOT EXISTS idx_licenses_is_activated ON public.licenses(is_activated);
 CREATE INDEX IF NOT EXISTS idx_licenses_message_id ON public.licenses(message_id) WHERE message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_licenses_expires_at ON public.licenses(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_licenses_moil_user_id ON public.licenses(moil_user_id) WHERE moil_user_id IS NOT NULL;
 
 -- Activity Logs indexes
 CREATE INDEX IF NOT EXISTS idx_activity_logs_team_id ON public.activity_logs(team_id);

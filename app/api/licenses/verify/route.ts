@@ -1,13 +1,23 @@
 import { NextResponse } from 'next/server';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import { isPartnerApiKeyValid } from '@/lib/partnerApiKey';
 
 /**
  * Public endpoint to verify license and organization
- * No authentication required - this is used by the mobile app
+ * Used by the mobile app.
+ * Optional auth: when PARTNER_SERVICE_API_KEY is set, the request must
+ * include a matching `x-partner-api-key` header.
  * Usage: GET /api/licenses/verify?licenseId=xxx&orgSlug=xxx
  */
 export async function GET(request: Request) {
   try {
+    if (!isPartnerApiKeyValid(request)) {
+      return NextResponse.json(
+        { error: 'Invalid API key', verified: false, partnerVerified: false },
+        { status: 401 }
+      );
+    }
+
     const { searchParams } = new URL(request.url);
     const licenseId = searchParams.get('licenseId');
     const orgSlug = searchParams.get('orgSlug');

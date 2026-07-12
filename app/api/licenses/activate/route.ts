@@ -1,14 +1,38 @@
 import { NextResponse } from 'next/server';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import { parsePlanKey, LICENSE_PLANS, BILLING_CYCLES, type LicensePlan, type BillingCycle } from '@/lib/licensePlanDefaults';
+import { isPartnerApiKeyValid } from '@/lib/partnerApiKey';
 
 /**
  * Public endpoint to activate a license
- * Called by external application
- * Updates business_name, business_type and sets license to activated
+ * Called by external application (the Moil backend)
+ * Updates business_name, business_type and sets license to activated.
+ *
+ * Optional body fields (newer Moil backend versions send these):
+ *   - moilUserId: the Moil (MongoDB) user id
+ *   - plan: resolved plan key, e.g. 'standard_yearly'
+ *   - planTier / billingCycle: explicit plan fields (win over `plan`)
+ *   - expiresAt: ISO date the granted plan expires
+ *
+ * Optional auth: when PARTNER_SERVICE_API_KEY is set, the request must
+ * include a matching `x-partner-api-key` header.
  */
 export async function POST(request: Request) {
   try {
-    const { licenseId, businessName, businessType } = await request.json();
+    if (!isPartnerApiKeyValid(request)) {
+      return NextResponse.json({ error: 'Invalid API key' }, { status: 401 });
+    }
+
+    const {
+      licenseId,
+      businessName,
+      businessType,
+      moilUserId,
+      plan,
+      planTier,
+      billingCycle,
+      expiresAt,
+    } = await request.json();
 
     if (!licenseId || !businessName || !businessType) {
       return NextResponse.json(
@@ -50,6 +74,18 @@ export async function POST(request: Request) {
       );
     }
 
+    // Derive plan metadata: explicit planTier/billingCycle win over the
+    // resolved `plan` key (e.g. 'standard_yearly'). All optional.
+    const resolvedPlan = parsePlanKey(plan);
+    const finalPlanTier =
+      typeof planTier === 'string' && LICENSE_PLANS.includes(planTier as LicensePlan)
+        ? planTier
+        : resolvedPlan?.planTier;
+    const finalBillingCycle =
+      typeof billingCycle === 'string' && BILLING_CYCLES.includes(billingCycle as BillingCycle)
+        ? billingCycle
+        : resolvedPlan?.billingCycle;
+
     // Update license with business info and activate
     const { data: updatedLicense, error: updateError } = await supabase
       .from('licenses')
@@ -57,7 +93,11 @@ export async function POST(request: Request) {
         business_name: businessName,
         business_type: businessType,
         is_activated: true,
-        activated_at: new Date().toISOString()
+        activated_at: new Date().toISOString(),
+        ...(typeof moilUserId === 'string' && moilUserId ? { moil_user_id: moilUserId } : {}),
+        ...(finalPlanTier ? { plan_tier: finalPlanTier } : {}),
+        ...(finalBillingCycle ? { billing_cycle: finalBillingCycle } : {}),
+        ...(typeof expiresAt === 'string' && expiresAt ? { expires_at: expiresAt } : {}),
       })
       .eq('id', licenseId)
       .select()
@@ -71,18 +111,34 @@ export async function POST(request: Request) {
       );
     }
 
-    // Update admin's active_purchased_license_count
-    const { error: adminUpdateError } = await supabase
-      .from('admins')
-      .update({
-        active_purchased_license_count: supabase.rpc('increment', { 
-          row_id: existingLicense.admin_id 
-        })
-      })
-      .eq('id', existingLicense.admin_id);
+    // Increment the admin's active_purchased_license_count.
+    // Best effort — a failure here must not fail the activation.
+    if (existingLicense.admin_id) {
+      try {
+        const { data: adminRow, error: adminFetchError } = await supabase
+          .from('admins')
+          .select('active_purchased_license_count')
+          .eq('id', existingLicense.admin_id)
+          .single();
 
-    if (adminUpdateError) {
-      console.error('Failed to update admin count:', adminUpdateError);
+        if (adminFetchError || !adminRow) {
+          console.error('Failed to fetch admin for count update:', adminFetchError);
+        } else {
+          const { error: adminUpdateError } = await supabase
+            .from('admins')
+            .update({
+              active_purchased_license_count:
+                (adminRow.active_purchased_license_count || 0) + 1,
+            })
+            .eq('id', existingLicense.admin_id);
+
+          if (adminUpdateError) {
+            console.error('Failed to update admin count:', adminUpdateError);
+          }
+        }
+      } catch (countError) {
+        console.error('Admin count update failed (non-fatal):', countError);
+      }
     }
 
     return NextResponse.json({
@@ -94,7 +150,11 @@ export async function POST(request: Request) {
         business_name: updatedLicense.business_name,
         business_type: updatedLicense.business_type,
         is_activated: updatedLicense.is_activated,
-        activated_at: updatedLicense.activated_at
+        activated_at: updatedLicense.activated_at,
+        plan_tier: updatedLicense.plan_tier ?? null,
+        billing_cycle: updatedLicense.billing_cycle ?? null,
+        expires_at: updatedLicense.expires_at ?? null,
+        moil_user_id: updatedLicense.moil_user_id ?? null,
       }
     }, { status: 200 });
 
