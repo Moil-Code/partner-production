@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import Logo from '@/components/ui/Logo';
-import { Activity, Users, LogOut, LayoutDashboard, Settings } from 'lucide-react';
+import { Activity, Users, LogOut, LayoutDashboard, Settings, CalendarDays } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
 
@@ -50,6 +50,12 @@ export function DashboardHeader({ onShowActivity, onShowTeam, onLogout, partnerN
               <LayoutDashboard className="w-4 h-4 mr-2" />
               Overview
             </Button>
+            <Link href="/admin/calendar">
+              <Button variant="ghost" size="sm" className="text-[var(--text-secondary)] font-medium hover:text-[var(--primary)] hover:bg-[var(--primary)]/5">
+                <CalendarDays className="w-4 h-4 mr-2" />
+                Calendar
+              </Button>
+            </Link>
           </nav>
         </div>
 
