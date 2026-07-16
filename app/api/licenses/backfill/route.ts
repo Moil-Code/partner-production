@@ -17,10 +17,11 @@ import {
  * (plan_tier, billing_cycle, months, expires_at, moil_user_id) onto EXISTING
  * license rows that were created before those columns existed.
  *
- * Trust model — mirrors /activate:
- *   - No API key. Like /activate, a caller must already know the exact license
- *     UUID(s) to affect anything; rows are matched ONLY by `licenseId`. There
- *     is no email/spray matching.
+ * Trust model — same public surface as /activate and /verify:
+ *   - No API key (matches the existing inter-server pattern).
+ *   - Rows are matched by license UUID when supplied, else by email — email is
+ *     the canonical cross-system join key (the partner apps were merged, so a
+ *     license's original UUID may differ from what Moil stored).
  *   - It ONLY writes the five metadata columns; it never touches is_activated,
  *     activated_at, email, business_name, admin/team/partner ids, or counters —
  *     so it is strictly less powerful than the already-public /activate.
@@ -30,7 +31,8 @@ import {
  *
  * Body: {
  *   items: Array<{
- *     licenseId: string,     // REQUIRED — the partner license row UUID
+ *     licenseId?: string,    // partner license row UUID (matched first)
+ *     email?: string,        // fallback match (canonical join key)
  *     moilUserId?: string,
  *     plan?: string,         // resolved key e.g. 'standard_yearly'
  *     planTier?: string,     // explicit; wins over `plan`
@@ -47,6 +49,7 @@ const MAX_ITEMS = 1000;
 
 type BackfillItem = {
   licenseId?: unknown;
+  email?: unknown;
   moilUserId?: unknown;
   plan?: unknown;
   planTier?: unknown;
@@ -57,6 +60,7 @@ type BackfillItem = {
 
 type LicenseRow = {
   id: string;
+  email: string | null;
   plan_tier: string | null;
   billing_cycle: string | null;
   months: number | null;
@@ -133,33 +137,47 @@ export async function POST(request: Request) {
       { auth: { autoRefreshToken: false, persistSession: false } }
     );
 
-    // Match ONLY by license id (same as /activate). Collect the ids we can act
-    // on and bulk-fetch them so we don't query per item.
+    // Bulk-fetch candidate rows by id AND by email so we don't query per item.
     const ids = new Set<string>();
+    const emails = new Set<string>();
     for (const it of items) {
       if (typeof it.licenseId === 'string' && it.licenseId) ids.add(it.licenseId);
+      if (typeof it.email === 'string' && it.email) emails.add(it.email.toLowerCase());
     }
 
     const rowsById = new Map<string, LicenseRow>();
-    const cols = 'id, plan_tier, billing_cycle, months, expires_at, moil_user_id';
+    const rowsByEmail = new Map<string, LicenseRow>();
+    const cols = 'id, email, plan_tier, billing_cycle, months, expires_at, moil_user_id';
     for (const batch of chunk([...ids], 200)) {
       const { data } = await supabase.from('licenses').select(cols).in('id', batch);
       for (const r of (data as LicenseRow[] | null) || []) rowsById.set(r.id, r);
+    }
+    for (const batch of chunk([...emails], 200)) {
+      const { data } = await supabase.from('licenses').select(cols).in('email', batch);
+      for (const r of (data as LicenseRow[] | null) || []) {
+        if (r.email) rowsByEmail.set(r.email.toLowerCase(), r);
+      }
     }
 
     let matched = 0;
     let updated = 0;
     let wouldUpdate = 0;
     let notFound = 0;
-    let missingLicenseId = 0;
+    let missingKey = 0;
     let alreadyComplete = 0;
 
     for (const it of items) {
-      if (typeof it.licenseId !== 'string' || !it.licenseId) {
-        missingLicenseId += 1;
+      const hasId = typeof it.licenseId === 'string' && it.licenseId;
+      const hasEmail = typeof it.email === 'string' && it.email;
+      if (!hasId && !hasEmail) {
+        missingKey += 1;
         continue;
       }
-      const row = rowsById.get(it.licenseId);
+      // Prefer id match; fall back to email (canonical join key).
+      const row =
+        (hasId && rowsById.get(it.licenseId as string)) ||
+        (hasEmail && rowsByEmail.get((it.email as string).toLowerCase())) ||
+        null;
       if (!row) {
         notFound += 1;
         continue;
@@ -219,7 +237,7 @@ export async function POST(request: Request) {
         wouldUpdate,
         alreadyComplete,
         notFound,
-        missingLicenseId,
+        missingKey,
       },
       { status: 200 }
     );
