@@ -11,8 +11,7 @@ This document describes the public API endpoints that can be called by external 
 1. [Verify License](#1-verify-license)
 2. [Activate License](#2-activate-license)
 3. [Purchase Licenses](#3-purchase-licenses)
-4. [API Key](#api-key)
-5. [License Plan Metadata Columns](#license-plan-metadata-columns)
+4. [License Plan Metadata Columns](#license-plan-metadata-columns)
 
 ---
 
@@ -28,7 +27,7 @@ GET /api/licenses/verify
 
 ### Authentication
 
-**Optional API key** - When the server has `PARTNER_SERVICE_API_KEY` configured, requests must include a matching `x-partner-api-key` header (see [API Key](#api-key)). When the env var is not configured, no authentication is required.
+**None required** - This is a public endpoint.
 
 ### Query Parameters
 
@@ -40,8 +39,7 @@ GET /api/licenses/verify
 ### Example Request
 
 ```bash
-curl -X GET "https://your-domain.com/api/licenses/verify?licenseId=550e8400-e29b-41d4-a716-446655440000&orgSlug=nerds-labs" \
-  -H "x-partner-api-key: YOUR_API_KEY"
+curl -X GET "https://your-domain.com/api/licenses/verify?licenseId=550e8400-e29b-41d4-a716-446655440000&orgSlug=nerds-labs"
 ```
 
 ### Success Response
@@ -65,16 +63,6 @@ curl -X GET "https://your-domain.com/api/licenses/verify?licenseId=550e8400-e29b
 ```json
 {
   "error": "License ID and Organization Slug are required",
-  "verified": false,
-  "partnerVerified": false
-}
-```
-
-**Status Code:** `401 Unauthorized` - Invalid API key (only when `PARTNER_SERVICE_API_KEY` is configured)
-
-```json
-{
-  "error": "Invalid API key",
   "verified": false,
   "partnerVerified": false
 }
@@ -104,13 +92,12 @@ POST /api/licenses/activate
 
 ### Authentication
 
-**Optional API key** - When the server has `PARTNER_SERVICE_API_KEY` configured, requests must include a matching `x-partner-api-key` header (see [API Key](#api-key)). When the env var is not configured, no authentication is required.
+**None required** - This is a public endpoint, called by the Moil backend.
 
 ### Request Headers
 
 ```
 Content-Type: application/json
-x-partner-api-key: YOUR_API_KEY   (only when PARTNER_SERVICE_API_KEY is configured)
 ```
 
 ### Request Body
@@ -131,7 +118,6 @@ x-partner-api-key: YOUR_API_KEY   (only when PARTNER_SERVICE_API_KEY is configur
 ```bash
 curl -X POST "https://your-domain.com/api/licenses/activate" \
   -H "Content-Type: application/json" \
-  -H "x-partner-api-key: YOUR_API_KEY" \
   -d '{
     "licenseId": "550e8400-e29b-41d4-a716-446655440000",
     "businessName": "Acme Corporation",
@@ -166,14 +152,6 @@ curl -X POST "https://your-domain.com/api/licenses/activate" \
 ```
 
 ### Error Responses
-
-**Status Code:** `401 Unauthorized` - Invalid API key (only when `PARTNER_SERVICE_API_KEY` is configured)
-
-```json
-{
-  "error": "Invalid API key"
-}
-```
 
 **Status Code:** `400 Bad Request` - Missing required fields
 
@@ -223,7 +201,7 @@ POST /api/licenses/purchase
 
 ### Authentication
 
-**None required** - This is a public endpoint (should be called from trusted payment provider). The optional `x-partner-api-key` check does **not** apply to this endpoint.
+**None required** - This is a public endpoint (should be called from trusted payment provider).
 
 ### Request Headers
 
@@ -307,16 +285,6 @@ curl -X POST "https://your-domain.com/api/licenses/purchase" \
   "error": "Failed to update license count"
 }
 ```
-
----
-
-## API Key
-
-The `verify` and `activate` endpoints support an optional shared-secret check:
-
-- When the server has the `PARTNER_SERVICE_API_KEY` environment variable set, every request to those endpoints must include an `x-partner-api-key` header whose value equals the configured key. Requests without it (or with a wrong value) receive `401 Unauthorized`.
-- When the env var is **not** set, the check is skipped entirely — existing callers keep working (safe rollout).
-- The `purchase` endpoint is intentionally excluded (it is called by payment redirects).
 
 ---
 

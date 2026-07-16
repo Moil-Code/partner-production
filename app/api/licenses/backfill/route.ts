@@ -8,50 +8,35 @@ import {
   type LicensePlan,
   type BillingCycle,
 } from '@/lib/licensePlanDefaults';
-/**
- * Fail-CLOSED auth for this bulk-write endpoint. Unlike verify/activate (which
- * stay backward-compatible and only enforce the key when it is configured),
- * backfill can PATCH many license rows, so it REQUIRES the shared secret to be
- * both configured and matched. If PARTNER_SERVICE_API_KEY is unset, every
- * request is rejected — the endpoint is never an unauthenticated write surface.
- */
-function isBackfillAuthorized(request: Request): boolean {
-  const expected = process.env.PARTNER_SERVICE_API_KEY;
-  if (!expected) return false; // fail closed when not configured
-  return request.headers.get('x-partner-api-key') === expected;
-}
 
 /**
- * Server-to-server backfill endpoint (called by the Moil backend's admin
- * "Backfill partner licenses" action).
+ * Public endpoint (same trust model as /activate and /verify) called by the
+ * Moil backend's admin "Backfill partner licenses" action.
  *
  * Fills the plan-metadata columns added by database/add_license_metadata.sql
  * (plan_tier, billing_cycle, months, expires_at, moil_user_id) onto EXISTING
  * license rows that were created before those columns existed.
  *
- * SAFETY — this endpoint is intentionally narrow:
+ * Trust model — mirrors /activate:
+ *   - No API key. Like /activate, a caller must already know the exact license
+ *     UUID(s) to affect anything; rows are matched ONLY by `licenseId`. There
+ *     is no email/spray matching.
  *   - It ONLY writes the five metadata columns; it never touches is_activated,
- *     activated_at, email, business_name, admin/team/partner ids, or counters.
- *   - It is FILL-IF-NULL by default (COALESCE): a column already holding a
- *     value is left untouched, so re-running is a safe no-op. Pass force:true
- *     to overwrite existing values.
+ *     activated_at, email, business_name, admin/team/partner ids, or counters —
+ *     so it is strictly less powerful than the already-public /activate.
+ *   - FILL-IF-NULL by default (a column already holding a value is left alone),
+ *     so re-running is a safe no-op. Pass force:true to overwrite.
  *   - dryRun:true reports what WOULD change without writing anything.
- *
- * Matching: by license id when provided (exact), else by lowercased email.
- *
- * Auth: when PARTNER_SERVICE_API_KEY is set, requires a matching
- * `x-partner-api-key` header (same gate as verify/activate).
  *
  * Body: {
  *   items: Array<{
- *     licenseId?: string,
- *     email?: string,
+ *     licenseId: string,     // REQUIRED — the partner license row UUID
  *     moilUserId?: string,
- *     plan?: string,          // resolved key e.g. 'standard_yearly'
- *     planTier?: string,      // explicit; wins over `plan`
- *     billingCycle?: string,  // explicit; wins over `plan`
+ *     plan?: string,         // resolved key e.g. 'standard_yearly'
+ *     planTier?: string,     // explicit; wins over `plan`
+ *     billingCycle?: string, // explicit; wins over `plan`
  *     months?: number,
- *     expiresAt?: string,     // ISO date
+ *     expiresAt?: string,    // ISO date
  *   }>,
  *   dryRun?: boolean,
  *   force?: boolean,
@@ -62,7 +47,6 @@ const MAX_ITEMS = 1000;
 
 type BackfillItem = {
   licenseId?: unknown;
-  email?: unknown;
   moilUserId?: unknown;
   plan?: unknown;
   planTier?: unknown;
@@ -73,7 +57,6 @@ type BackfillItem = {
 
 type LicenseRow = {
   id: string;
-  email: string | null;
   plan_tier: string | null;
   billing_cycle: string | null;
   months: number | null;
@@ -118,18 +101,14 @@ function resolveDesired(item: BackfillItem) {
   return { planTier, billingCycle, months, moilUserId, expiresAt };
 }
 
+const chunk = <T,>(arr: T[], n: number): T[][] => {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+};
+
 export async function POST(request: Request) {
   try {
-    if (!isBackfillAuthorized(request)) {
-      return NextResponse.json(
-        {
-          error:
-            'Unauthorized. This endpoint requires PARTNER_SERVICE_API_KEY to be configured and a matching x-partner-api-key header.',
-        },
-        { status: 401 }
-      );
-    }
-
     const body = await request.json().catch(() => null);
     if (!body || !Array.isArray(body.items)) {
       return NextResponse.json(
@@ -154,68 +133,42 @@ export async function POST(request: Request) {
       { auth: { autoRefreshToken: false, persistSession: false } }
     );
 
-    // Collect the keys we can match on.
+    // Match ONLY by license id (same as /activate). Collect the ids we can act
+    // on and bulk-fetch them so we don't query per item.
     const ids = new Set<string>();
-    const emails = new Set<string>();
     for (const it of items) {
       if (typeof it.licenseId === 'string' && it.licenseId) ids.add(it.licenseId);
-      if (typeof it.email === 'string' && it.email) emails.add(it.email.toLowerCase());
     }
 
-    // Bulk-fetch candidate rows (by id and by email) so we don't issue a query
-    // per item.
     const rowsById = new Map<string, LicenseRow>();
-    const rowsByEmail = new Map<string, LicenseRow>();
-    const cols = 'id, email, plan_tier, billing_cycle, months, expires_at, moil_user_id';
-
-    const chunk = <T,>(arr: T[], n: number): T[][] => {
-      const out: T[][] = [];
-      for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-      return out;
-    };
-
+    const cols = 'id, plan_tier, billing_cycle, months, expires_at, moil_user_id';
     for (const batch of chunk([...ids], 200)) {
       const { data } = await supabase.from('licenses').select(cols).in('id', batch);
       for (const r of (data as LicenseRow[] | null) || []) rowsById.set(r.id, r);
-    }
-    for (const batch of chunk([...emails], 200)) {
-      // emails are stored lowercased; match directly
-      const { data } = await supabase.from('licenses').select(cols).in('email', batch);
-      for (const r of (data as LicenseRow[] | null) || []) {
-        if (r.email) rowsByEmail.set(r.email.toLowerCase(), r);
-      }
     }
 
     let matched = 0;
     let updated = 0;
     let wouldUpdate = 0;
     let notFound = 0;
+    let missingLicenseId = 0;
     let alreadyComplete = 0;
-    const notFoundKeys: string[] = [];
 
     for (const it of items) {
-      const row =
-        (typeof it.licenseId === 'string' && it.licenseId && rowsById.get(it.licenseId)) ||
-        (typeof it.email === 'string' && it.email && rowsByEmail.get(it.email.toLowerCase())) ||
-        null;
-
+      if (typeof it.licenseId !== 'string' || !it.licenseId) {
+        missingLicenseId += 1;
+        continue;
+      }
+      const row = rowsById.get(it.licenseId);
       if (!row) {
         notFound += 1;
-        if (notFoundKeys.length < 50) {
-          notFoundKeys.push(
-            (typeof it.email === 'string' && it.email) ||
-              (typeof it.licenseId === 'string' && it.licenseId) ||
-              'unknown'
-          );
-        }
         continue;
       }
       matched += 1;
 
       const desired = resolveDesired(it);
 
-      // Build the patch: fill-if-null unless force. Only include columns that
-      // actually change.
+      // Fill-if-null unless force. Only include columns that actually change.
       const patch: Record<string, string | number> = {};
       const consider = (
         col: 'plan_tier' | 'billing_cycle' | 'months' | 'expires_at' | 'moil_user_id',
@@ -266,7 +219,7 @@ export async function POST(request: Request) {
         wouldUpdate,
         alreadyComplete,
         notFound,
-        notFoundSample: notFoundKeys,
+        missingLicenseId,
       },
       { status: 200 }
     );

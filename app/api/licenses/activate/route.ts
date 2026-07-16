@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { parsePlanKey, LICENSE_PLANS, BILLING_CYCLES, type LicensePlan, type BillingCycle } from '@/lib/licensePlanDefaults';
-import { isPartnerApiKeyValid } from '@/lib/partnerApiKey';
 
 /**
  * Public endpoint to activate a license
@@ -13,16 +12,9 @@ import { isPartnerApiKeyValid } from '@/lib/partnerApiKey';
  *   - plan: resolved plan key, e.g. 'standard_yearly'
  *   - planTier / billingCycle: explicit plan fields (win over `plan`)
  *   - expiresAt: ISO date the granted plan expires
- *
- * Optional auth: when PARTNER_SERVICE_API_KEY is set, the request must
- * include a matching `x-partner-api-key` header.
  */
 export async function POST(request: Request) {
   try {
-    if (!isPartnerApiKeyValid(request)) {
-      return NextResponse.json({ error: 'Invalid API key' }, { status: 401 });
-    }
-
     const {
       licenseId,
       businessName,
