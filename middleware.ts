@@ -40,6 +40,7 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/health') ||
     request.nextUrl.pathname.startsWith('/api/licenses/verify') ||
     request.nextUrl.pathname.startsWith('/api/licenses/activate') ||
+    request.nextUrl.pathname.startsWith('/api/licenses/backfill') ||
     request.nextUrl.pathname.startsWith('/api/licenses/purchase') ||
     request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||
     request.nextUrl.pathname.startsWith('/api/signup/') ||
