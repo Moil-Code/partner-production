@@ -44,7 +44,8 @@ import {
   X,
   Edit2,
   Check,
-  Trash2
+  Trash2,
+  Send
 } from 'lucide-react';
 
 interface Partner {
@@ -110,6 +111,7 @@ export default function MoilAdminDashboard() {
   const [editingEmail, setEditingEmail] = React.useState('');
   const [updatingEmail, setUpdatingEmail] = React.useState(false);
   const [processingLicenseId, setProcessingLicenseId] = React.useState<string | null>(null);
+  const [resendingLicenseId, setResendingLicenseId] = React.useState<string | null>(null);
   
   // Confirmation modal state
   const [confirmModal, setConfirmModal] = React.useState<{
@@ -467,6 +469,39 @@ export default function MoilAdminDashboard() {
       });
     } finally {
       setUpdatingEmail(false);
+    }
+  };
+
+  const handleResendLicenseEmail = async (license: any) => {
+    setResendingLicenseId(license.id);
+    try {
+      const response = await fetch('/api/licenses/resend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ licenseId: license.id }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to resend license email');
+      }
+
+      toast({
+        title: 'Email Sent',
+        description: `Activation email resent to ${license.email}`,
+        type: 'success',
+      });
+
+      fetchLicenses();
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to resend license email',
+        type: 'error',
+      });
+    } finally {
+      setResendingLicenseId(null);
     }
   };
 
@@ -1210,6 +1245,9 @@ export default function MoilAdminDashboard() {
                                   </>
                                 )}
                               </span>
+                              {!license.is_activated && license.email_status === 'failed' && (
+                                <p className="mt-1 text-xs text-red-600">Email failed to send</p>
+                              )}
                             </td>
                             <td className="py-4 px-4 text-[var(--text-secondary)] text-sm">
                               {new Date(license.created_at).toLocaleDateString()}
@@ -1223,8 +1261,25 @@ export default function MoilAdminDashboard() {
                               ) : (
                                 <div className="flex items-center justify-end gap-1">
                                   <button
+                                    onClick={() => handleResendLicenseEmail(license)}
+                                    disabled={
+                                      editingLicenseId === license.id ||
+                                      processingLicenseId === license.id ||
+                                      resendingLicenseId === license.id
+                                    }
+                                    className="p-2 text-[var(--text-tertiary)] hover:text-[var(--primary)] hover:bg-[var(--primary)]/10 rounded-lg transition-colors disabled:opacity-50"
+                                    title="Resend activation email"
+                                    aria-label={`Resend activation email to ${license.email}`}
+                                  >
+                                    {resendingLicenseId === license.id ? (
+                                      <Spinner size="sm" className="w-4 h-4" />
+                                    ) : (
+                                      <Send className="w-4 h-4" />
+                                    )}
+                                  </button>
+                                  <button
                                     onClick={() => handleEditEmail(license)}
-                                    disabled={editingLicenseId === license.id || processingLicenseId === license.id}
+                                    disabled={editingLicenseId === license.id || processingLicenseId === license.id || resendingLicenseId === license.id}
                                     className="p-2 text-[var(--text-tertiary)] hover:text-[var(--primary)] hover:bg-[var(--primary)]/10 rounded-lg transition-colors disabled:opacity-50"
                                     title="Edit email"
                                   >
@@ -1232,7 +1287,7 @@ export default function MoilAdminDashboard() {
                                   </button>
                                   <button
                                     onClick={() => handleDeleteLicense(license)}
-                                    disabled={processingLicenseId === license.id || editingLicenseId === license.id}
+                                    disabled={processingLicenseId === license.id || editingLicenseId === license.id || resendingLicenseId === license.id}
                                     className="p-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors disabled:opacity-50"
                                     title="Delete license"
                                   >

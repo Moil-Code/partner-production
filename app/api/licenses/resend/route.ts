@@ -1,6 +1,37 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { sendLicenseActivationEmail } from '@/lib/email';
+import { sendLicenseActivationEmail, type EdcEmailInfo } from '@/lib/email';
+
+// Minimum gap between two sends for the same license. Guards against
+// accidental double-sends / mashing the resend button in the dashboard.
+const RESEND_COOLDOWN_MS = 60 * 1000;
+
+interface PartnerBranding {
+  id: string;
+  name: string;
+  program_name?: string | null;
+  logo_url?: string | null;
+  logo_initial?: string | null;
+  primary_color?: string | null;
+  support_email?: string | null;
+}
+
+const PARTNER_BRANDING_COLUMNS =
+  'id, name, program_name, logo_url, logo_initial, primary_color, support_email';
+
+function buildEdcInfo(partner: PartnerBranding | null): EdcEmailInfo | undefined {
+  if (!partner) return undefined;
+  return {
+    programName: partner.program_name || partner.name || 'Moil Partners',
+    fullName: partner.name || 'Moil Partners',
+    // Don't default to the Moil logo — the template falls back to logoInitial.
+    logo: partner.logo_url || undefined,
+    logoInitial: partner.logo_initial || partner.name?.charAt(0) || 'M',
+    primaryColor: partner.primary_color || '#5843BE',
+    supportEmail: partner.support_email || 'support@moilapp.com',
+    licenseDuration: '12 months',
+  };
+}
 
 export async function POST(request: Request) {
   try {
@@ -25,10 +56,10 @@ export async function POST(request: Request) {
       );
     }
 
-    // Verify user is an admin and get partner info with full branding
+    // Verify user is an admin and get their own partner branding
     const { data: adminData, error: adminError } = await supabase
       .from('admins')
-      .select('*, partner:partners(id, name, program_name, logo_url, logo_initial, primary_color, support_email)')
+      .select(`*, partner:partners(${PARTNER_BRANDING_COLUMNS})`)
       .eq('id', user.id)
       .single();
 
@@ -39,31 +70,9 @@ export async function POST(request: Request) {
       );
     }
 
-    // Get partner info for activation URL and email branding
-    const partnerInfo = adminData.partner as { 
-      id: string; 
-      name: string; 
-      program_name?: string;
-      logo_url?: string;
-      logo_initial?: string;
-      primary_color?: string;
-      support_email?: string;
-    } | null;
-    const partnerName = partnerInfo?.name || 'moil-partners';
-    // Create URL-safe org name (replace spaces with hyphens)
-    // Partner names are already lowercase and contain only alphanumeric chars and spaces
-    const orgSlug = partnerName.replace(/\s+/g, '-');
-    
-    // Build EDC info for email from partner data
-    const edcInfo = partnerInfo ? {
-      programName: partnerInfo.program_name || partnerInfo.name || 'Moil Partners',
-      fullName: partnerInfo.name || 'Moil Partners',
-      logo: partnerInfo.logo_url || undefined, // Don't default to Moil logo - let email template use logoInitial fallback
-      logoInitial: partnerInfo.logo_initial || partnerInfo.name?.charAt(0) || 'M',
-      primaryColor: partnerInfo.primary_color || '#5843BE',
-      supportEmail: partnerInfo.support_email || 'support@moilapp.com',
-      licenseDuration: '12 months',
-    } : undefined;
+    const isMoilAdmin =
+      adminData.global_role === 'moil_admin' ||
+      (adminData.email as string | null)?.endsWith('@moilapp.com') === true;
 
     // Get user's team
     const { data: teamMember } = await supabase
@@ -74,13 +83,14 @@ export async function POST(request: Request) {
 
     const teamId = teamMember?.team_id;
 
-    // Get the license - team members can resend for any team license
     let licenseQuery = supabase
       .from('licenses')
       .select('*')
       .eq('id', licenseId);
 
-    if (teamId) {
+    if (isMoilAdmin) {
+      // Moil admins can resend for any license (RLS grants cross-partner read).
+    } else if (teamId) {
       // If user is in a team, they can resend for any team license
       licenseQuery = licenseQuery.eq('team_id', teamId);
     } else {
@@ -104,6 +114,48 @@ export async function POST(request: Request) {
       );
     }
 
+    // Cooldown — don't let the same license be emailed twice in quick succession.
+    const lastSentAt = license.last_reminder_sent_at || license.activation_email_sent_at;
+    if (lastSentAt) {
+      const elapsed = Date.now() - new Date(lastSentAt).getTime();
+      if (elapsed < RESEND_COOLDOWN_MS) {
+        const waitSeconds = Math.ceil((RESEND_COOLDOWN_MS - elapsed) / 1000);
+        return NextResponse.json(
+          { error: `An email was just sent to this address. Try again in ${waitSeconds}s.` },
+          { status: 429 }
+        );
+      }
+    }
+
+    // Branding: prefer the partner the license belongs to (a Moil admin may be
+    // resending on behalf of another workspace), then the license owner's
+    // partner, and finally the acting admin's own partner.
+    let partnerInfo = (adminData.partner as PartnerBranding | null) || null;
+
+    if (license.partner_id && license.partner_id !== partnerInfo?.id) {
+      const { data: licensePartner } = await supabase
+        .from('partners')
+        .select(PARTNER_BRANDING_COLUMNS)
+        .eq('id', license.partner_id)
+        .single();
+      if (licensePartner) partnerInfo = licensePartner as PartnerBranding;
+    } else if (!license.partner_id && license.admin_id && license.admin_id !== user.id) {
+      const { data: ownerAdmin } = await supabase
+        .from('admins')
+        .select(`partner:partners(${PARTNER_BRANDING_COLUMNS})`)
+        .eq('id', license.admin_id)
+        .single();
+      const ownerPartner = ownerAdmin?.partner as PartnerBranding | null | undefined;
+      if (ownerPartner) partnerInfo = ownerPartner;
+    }
+
+    const partnerName = partnerInfo?.name || 'moil-partners';
+    // Create URL-safe org name (replace spaces with hyphens)
+    // Partner names are already lowercase and contain only alphanumeric chars and spaces
+    const orgSlug = partnerName.replace(/\s+/g, '-');
+
+    const edcInfo = buildEdcInfo(partnerInfo);
+
     // Resend activation email with license ID for activation
     const activationUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/register?licenseId=${license.id}&ref=moilPartners&org=${orgSlug}`;
 
@@ -114,6 +166,8 @@ export async function POST(request: Request) {
       edc: edcInfo,
     });
 
+    const sentAt = new Date().toISOString();
+
     // Update message_id and email_status based on result
     if (emailResult.success && emailResult.messageId) {
       await supabase
@@ -121,7 +175,7 @@ export async function POST(request: Request) {
         .update({
           message_id: emailResult.messageId,
           email_status: 'sent',
-          activation_email_sent_at: new Date().toISOString(),
+          activation_email_sent_at: sentAt,
           last_reminder_sent_at: null,
           reminder_count: 0,
         })
@@ -130,7 +184,7 @@ export async function POST(request: Request) {
       console.error('Failed to resend activation email:', emailResult.error);
       await supabase
         .from('licenses')
-        .update({ 
+        .update({
           email_status: 'failed'
         })
         .eq('id', license.id);
@@ -152,7 +206,11 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(
-      { message: 'Activation email resent successfully' },
+      {
+        message: 'Activation email resent successfully',
+        email: license.email,
+        sentAt,
+      },
       { status: 200 }
     );
   } catch (error) {
