@@ -53,7 +53,13 @@ Export all licenses to CSV file.
 
 **CSV Columns:**
 - Email
+- Type (License/Add-on) — an "Add-on" is a time-boxed tier upgrade on top of a
+  licensee's existing license, not a separate licensee. Without this column an
+  export of 12 rows can be 9 people and nothing in the file says so.
 - Status (Active/Pending)
+- Plan Tier
+- Billing Cycle
+- Expires
 - Date Added
 - Activated At
 

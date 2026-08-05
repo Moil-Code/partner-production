@@ -11,7 +11,8 @@ This document describes the public API endpoints that can be called by external 
 1. [Verify License](#1-verify-license)
 2. [Activate License](#2-activate-license)
 3. [Purchase Licenses](#3-purchase-licenses)
-4. [License Plan Metadata Columns](#license-plan-metadata-columns)
+4. [Record Plan Add-on](#4-record-plan-add-on)
+5. [License Plan Metadata Columns](#license-plan-metadata-columns)
 
 ---
 
@@ -323,6 +324,93 @@ All endpoints return errors in the following format:
 
 ---
 
+## 4. Record Plan Add-on
+
+Mirror a time-boxed tier upgrade ("add-on") that the Moil backend has granted on
+top of a licensee's existing license — e.g. two months of Market Pro over a
+standard annual partner license. The base license keeps running underneath and
+the founder falls back to it when the add-on lapses.
+
+**The Moil backend is authoritative.** It owns the grant's clock, the entitlement
+merge and the AI-credit overlay. This endpoint records the add-on so it is
+visible in the partner dashboards; it grants access to nothing.
+
+### Endpoint
+
+```
+POST /api/licenses/addon
+```
+
+### Authentication
+
+**Required.** Send the shared secret as `x-internal-api-key` (or `x-api-key`):
+
+```
+x-internal-api-key: <MOIL_INTERNAL_API_KEY>
+```
+
+Unlike `/activate`, this endpoint is not open. `/activate` mutates a row whose
+`licenseId` the caller already holds — the id is the capability. This one
+**creates** rows, so an open version would let anyone reaching the host write
+licence records against any email. It returns **503** when
+`MOIL_INTERNAL_API_KEY` is unset: a missing key never means "allow everyone".
+
+### Request Body
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `email` | string | Yes | Licensee's email |
+| `planTier` | string | Yes | `standard` \| `professional` \| `market_pro` |
+| `expiresAt` | ISO date | Yes | When the add-on ends |
+| `startsAt` | ISO date | No | Defaults to now |
+| `moilUserId` | string | No | Moil (Mongo) user id |
+| `parentLicenseId` | UUID | No | Base license; inferred from the email when omitted |
+
+`expiresAt` is required because every reader treats an add-on with no end date
+as inactive — a row without one would look like an upgrade and mean nothing.
+
+### Success Response (200)
+
+```json
+{
+  "success": true,
+  "license": {
+    "id": "uuid",
+    "email": "founder@example.com",
+    "grant_kind": "addon",
+    "plan_tier": "market_pro",
+    "starts_at": "2026-08-05T00:00:00.000Z",
+    "expires_at": "2026-10-05T00:00:00.000Z",
+    "parent_license_id": "uuid"
+  }
+}
+```
+
+Idempotent on `(email, plan_tier, expires_at)` — a retry returns
+`"alreadyRecorded": true` rather than creating a second row.
+
+### Error Responses
+
+| Status | Meaning |
+|---|---|
+| 400 | Missing/invalid `email`, `planTier` or `expiresAt` |
+| 401 | Wrong or missing API key |
+| 503 | `MOIL_INTERNAL_API_KEY` not configured on the server |
+
+### Add-ons and seat counts
+
+Add-on rows carry `grant_kind = 'addon'` and are **excluded from every seat
+count** — `/api/licenses/stats`, `/api/licenses/list`, the team capacity check
+and the activation counter. An add-on upgrades an existing licensee, so counting
+it would show two licenses for one person and consume a seat the partner paid
+for. Add-on totals are reported separately as `addons` / `addons_active`.
+
+The duplicate-email check in the internal `/api/licenses/add` route is likewise
+scoped to `grant_kind = 'base'`, so holding an add-on never blocks a licensee
+from being issued their own license.
+
+---
+
 ## Typical Flow
 
 1. **Admin purchases licenses** → Payment provider calls `/api/licenses/purchase` to add licenses to the admin's team
@@ -330,6 +418,7 @@ All endpoints return errors in the following format:
 3. **User receives email** → User gets activation email with link containing `licenseId`
 4. **Mobile app verifies license** → App calls `/api/licenses/verify?licenseId=xxx&orgSlug=xxx` to check validity
 5. **User activates license** → App calls `/api/licenses/activate` with business info (plus optional plan metadata) to activate
+6. **Moil grants a temporary upgrade** (optional) → Moil backend calls `/api/licenses/addon` so the add-on is visible here; it expires on its own date and the licensee returns to their base license
 
 ---
 
