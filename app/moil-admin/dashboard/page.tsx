@@ -95,6 +95,13 @@ export default function MoilAdminDashboard() {
   const [licensePlan, setLicensePlan] = React.useState<LicensePlan | ''>('');
   const [licenseBillingCycle, setLicenseBillingCycle] = React.useState<BillingCycle>('yearly');
   const [licenseMonths, setLicenseMonths] = React.useState<string>('');
+  // Set when the API reports the email already holds a lower-tier license.
+  const [upgradePrompt, setUpgradePrompt] = React.useState<{
+    email: string;
+    monthsValue?: number;
+    currentDisplay: string;
+    requestedDisplay: string;
+  } | null>(null);
   const [addingLicense, setAddingLicense] = React.useState(false);
 
   const resetAddLicenseForm = () => {
@@ -102,6 +109,7 @@ export default function MoilAdminDashboard() {
     setLicensePlan('');
     setLicenseBillingCycle('yearly');
     setLicenseMonths('');
+    setUpgradePrompt(null);
   };
   const [licenses, setLicenses] = React.useState<any[]>([]);
   const [licensesLoading, setLicensesLoading] = React.useState(false);
@@ -367,37 +375,72 @@ export default function MoilAdminDashboard() {
       monthsValue = n;
     }
 
+    await submitLicense({ email: licenseEmail.trim().toLowerCase(), monthsValue, upgrade: false });
+  };
+
+  /**
+   * Shared submit for both "add" and "upgrade".
+   *
+   * A licensee who already holds a license comes back as a 409 with
+   * `code: 'UPGRADE_AVAILABLE'` rather than a flat refusal. We do NOT resubmit
+   * automatically — an upgrade costs money and changes someone's plan, so the
+   * admin confirms first and the second call carries `upgrade: true`.
+   */
+  const submitLicense = async ({
+    email,
+    monthsValue,
+    upgrade,
+  }: {
+    email: string;
+    monthsValue?: number;
+    upgrade: boolean;
+  }) => {
     setAddingLicense(true);
     try {
       const response = await fetch('/api/licenses/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: licenseEmail.trim().toLowerCase(),
-          adminId: admin.id,
+          email,
+          adminId: admin?.id,
           plan: licensePlan,
           billingCycle: licenseBillingCycle,
           ...(monthsValue !== undefined && { months: monthsValue }),
+          ...(upgrade ? { upgrade: true } : {}),
         }),
       });
 
       const data = await response.json();
 
+      // Already licensed, and the requested plan is HIGHER — offer the upgrade.
+      if (response.status === 409 && data.code === 'UPGRADE_AVAILABLE') {
+        setUpgradePrompt({
+          email,
+          monthsValue,
+          currentDisplay: data.currentPlan?.display || 'their current plan',
+          requestedDisplay: data.requestedPlan?.display || 'the selected plan',
+        });
+        return;
+      }
+
       if (data.error) {
         toast({
-          title: 'Error',
+          title: response.status === 409 ? 'Already Licensed' : 'Error',
           description: data.error,
-          type: 'error',
+          type: response.status === 409 ? 'warning' : 'error',
         });
         return;
       }
 
       toast({
-        title: 'License Added',
-        description: `License created and activation email sent to ${licenseEmail}`,
+        title: data.upgraded ? 'License Upgraded' : 'License Added',
+        description: data.upgraded
+          ? `${email} is now on ${data.license?.planDisplay || 'the new plan'}.`
+          : `License created and activation email sent to ${email}`,
         type: 'success',
       });
 
+      setUpgradePrompt(null);
       resetAddLicenseForm();
       setShowAddLicenseModal(false);
 
@@ -1449,6 +1492,34 @@ export default function MoilAdminDashboard() {
           </div>
         </div>
       )}
+
+      {/*
+        Upgrade confirmation. The API refuses to change an existing licensee's
+        plan without this second, explicit call — an upgrade costs money and
+        changes what someone is paying for, so it is never applied as a side
+        effect of pressing "Add License".
+      */}
+      <ConfirmationModal
+        isOpen={!!upgradePrompt}
+        onClose={() => setUpgradePrompt(null)}
+        onConfirm={() => {
+          if (!upgradePrompt) return;
+          submitLicense({
+            email: upgradePrompt.email,
+            monthsValue: upgradePrompt.monthsValue,
+            upgrade: true,
+          });
+        }}
+        title="Upgrade this license?"
+        description={
+          upgradePrompt
+            ? `${upgradePrompt.email} already has ${upgradePrompt.currentDisplay}. Upgrading moves them to ${upgradePrompt.requestedDisplay} — their existing license is replaced, not duplicated, and no extra seat is used.`
+            : ''
+        }
+        confirmText="Upgrade"
+        variant="warning"
+        isLoading={addingLicense}
+      />
 
       {/* Confirmation Modal */}
       <ConfirmationModal

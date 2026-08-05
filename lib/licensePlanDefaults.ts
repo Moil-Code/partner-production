@@ -31,6 +31,55 @@ export type ParseResult =
  * 'market_pro_monthly' into { planTier, billingCycle }.
  * Returns null when the key doesn't match a known tier + cycle.
  */
+/**
+ * Founder-facing plan names. Used in emails and in the upgrade confirmation,
+ * where "market_pro" in front of an admin about to spend money is not good
+ * enough.
+ */
+export const PLAN_DISPLAY_NAMES: Record<LicensePlan, string> = {
+  standard: 'Starter',
+  professional: 'Professional',
+  market_pro: 'Market Pro',
+};
+
+export function describePlan(
+  plan: LicensePlan,
+  billingCycle: BillingCycle,
+  months?: number
+): string {
+  const tier = PLAN_DISPLAY_NAMES[plan] || plan;
+  if (billingCycle === 'yearly') return `${tier} Annual`;
+  if (months && months > 1) return `${tier} — ${months} months`;
+  return `${tier} Monthly`;
+}
+
+/**
+ * Tier ordering, used to tell an UPGRADE from a downgrade.
+ *
+ * MUST match Moil-codeStagingBackend/utils/planEntitlement.js → planRank,
+ * which is what the Moil backend uses to decide whether to re-enroll a
+ * licensee or refuse with `blocked_downgrade`. If these two disagree, this app
+ * offers an upgrade the backend then silently refuses — the admin sees a
+ * success toast and nothing changes.
+ *
+ * Within a tier, yearly ranks half a step above monthly, so moving a monthly
+ * licensee to the annual plan of the same tier counts as an upgrade.
+ */
+const TIER_RANK: Record<LicensePlan, number> = {
+  standard: 1,
+  professional: 2,
+  market_pro: 3,
+};
+
+export function planRank(
+  plan: unknown,
+  billingCycle?: unknown
+): number {
+  if (typeof plan !== 'string' || !(plan in TIER_RANK)) return -1;
+  const base = TIER_RANK[plan as LicensePlan];
+  return base + (billingCycle === 'yearly' ? 0.5 : 0);
+}
+
 export function parsePlanKey(
   planKey: unknown
 ): { planTier: LicensePlan; billingCycle: BillingCycle } | null {

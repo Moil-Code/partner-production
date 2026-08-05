@@ -95,7 +95,9 @@ export async function POST(request: Request) {
       const { count: assignedCount } = await supabase
         .from('licenses')
         .select('*', { count: 'exact', head: true })
-        .eq('team_id', teamId);
+        .eq('team_id', teamId)
+        // Add-ons upgrade an existing licensee; they consume no seat.
+        .eq('grant_kind', 'base');
 
       const availableLicenses = (team.purchased_license_count || 0) - (assignedCount || 0);
 
@@ -118,7 +120,9 @@ export async function POST(request: Request) {
     const { data: existingLicenses } = await adminSupabase
       .from('licenses')
       .select('email')
-      .in('email', lowercaseEmails);
+      .in('email', lowercaseEmails)
+      // BASE licenses only — see the note in /api/licenses/add.
+      .eq('grant_kind', 'base');
 
     const licensedEmails = new Set(existingLicenses?.map(l => l.email) || []);
 
@@ -147,7 +151,8 @@ export async function POST(request: Request) {
         let existingQuery = supabase
           .from('licenses')
           .select('id')
-          .eq('email', email.toLowerCase());
+          .eq('email', email.toLowerCase())
+          .eq('grant_kind', 'base');
 
         if (teamId) {
           existingQuery = existingQuery.eq('team_id', teamId);

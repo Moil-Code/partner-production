@@ -79,7 +79,9 @@ export async function POST(request: Request) {
       const { count: assignedCount } = await supabase
         .from('licenses')
         .select('*', { count: 'exact', head: true })
-        .eq('team_id', teamId);
+        .eq('team_id', teamId)
+        // Add-ons upgrade an existing licensee; they consume no seat.
+        .eq('grant_kind', 'base');
 
       availableLicenses = (team.purchased_license_count || 0) - (assignedCount || 0);
       if (availableLicenses <= 0) {
@@ -110,7 +112,11 @@ export async function POST(request: Request) {
     const { data: existingLicenses } = await adminSupabase
       .from('licenses')
       .select('email')
-      .in('email', parsedEmails);
+      .in('email', parsedEmails)
+      // BASE licenses only. An add-on is a temporary tier upgrade sitting on
+      // top of someone's license, so an unscoped check would refuse to issue a
+      // license to anyone who has ever held one.
+      .eq('grant_kind', 'base');
 
     const licensedEmails = new Set(existingLicenses?.map((l: { email: string }) => l.email) || []);
     const emailsWithGlobalLicenses = parsedEmails.filter((e: string) => licensedEmails.has(e));
@@ -128,7 +134,11 @@ export async function POST(request: Request) {
     // Per-admin/team duplicate check
     const existingChecks = await Promise.all(
       parsedEmails.map(async (email: string) => {
-        let q = supabase.from('licenses').select('id').eq('email', email);
+        let q = supabase
+          .from('licenses')
+          .select('id')
+          .eq('email', email)
+          .eq('grant_kind', 'base');
         q = teamId ? q.eq('team_id', teamId) : q.eq('admin_id', user.id);
         const { data } = await q.single();
         return { email, exists: !!data };
