@@ -40,6 +40,11 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/health') ||
     request.nextUrl.pathname.startsWith('/api/licenses/verify') ||
     request.nextUrl.pathname.startsWith('/api/licenses/activate') ||
+    // Service-to-service: the Moil backend mirrors a plan grant here. Unlike
+    // its siblings this route is NOT open — it enforces MOIL_INTERNAL_API_KEY
+    // itself and fails closed when unset, because it CREATES license rows
+    // rather than mutating one the caller already holds an id for.
+    request.nextUrl.pathname.startsWith('/api/licenses/addon') ||
     request.nextUrl.pathname.startsWith('/api/licenses/backfill') ||
     request.nextUrl.pathname.startsWith('/api/licenses/purchase') ||
     request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||

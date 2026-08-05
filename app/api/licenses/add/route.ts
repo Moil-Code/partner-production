@@ -73,12 +73,20 @@ export async function POST(request: Request) {
     const teamId = teamMember?.team_id;
     const team = teamMember?.team as unknown as { id: string; purchased_license_count: number } | null;
 
-    // Global duplicate check
+    // Global duplicate check — BASE licenses only.
+    //
+    // Add-on rows (grant_kind = 'addon') are time-boxed tier upgrades sitting
+    // on top of a licensee's existing license, and they live in this same
+    // table. An unscoped check would refuse to issue a base license to anyone
+    // who has ever held an add-on, and — read the other way — the add-on flow
+    // could never target someone who already has a license, which is every
+    // single person an add-on is for.
     const adminSupabase = createAdminClient();
     const { data: globalLicense } = await adminSupabase
       .from('licenses')
       .select('id')
       .eq('email', email.toLowerCase())
+      .eq('grant_kind', 'base')
       .single();
 
     if (globalLicense) {
@@ -88,12 +96,15 @@ export async function POST(request: Request) {
       );
     }
 
-    // Team capacity check
+    // Team capacity check — add-ons do not consume a seat.
+    // An add-on upgrades someone who already holds a license, so counting it
+    // would charge a partner twice for the same person.
     if (teamId && team) {
       const { count: assignedCount } = await supabase
         .from('licenses')
         .select('*', { count: 'exact', head: true })
-        .eq('team_id', teamId);
+        .eq('team_id', teamId)
+        .eq('grant_kind', 'base');
 
       const available = (team.purchased_license_count || 0) - (assignedCount || 0);
       if (available <= 0) {

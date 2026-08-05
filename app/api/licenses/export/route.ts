@@ -57,9 +57,13 @@ export async function GET(request: Request) {
     }
 
     // Generate CSV
-    const headers = ['Email', 'Status', 'Plan Tier', 'Billing Cycle', 'Expires', 'Date Added', 'Activated At'];
+    // 'Type' distinguishes a licensee's own license from a time-boxed tier
+    // upgrade granted on top of one. Without it an export of 12 rows can be
+    // 9 people, and nothing in the file says so.
+    const headers = ['Email', 'Type', 'Status', 'Plan Tier', 'Billing Cycle', 'Expires', 'Date Added', 'Activated At'];
     const rows = licenses.map(license => [
       license.email,
+      license.grant_kind === 'addon' ? 'Add-on' : 'License',
       license.is_activated ? 'Active' : 'Pending',
       license.plan_tier || 'N/A',
       license.billing_cycle || 'N/A',

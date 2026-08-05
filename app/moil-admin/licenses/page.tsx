@@ -28,6 +28,13 @@ interface License {
   activated_at: string | null;
   team_id: string | null;
   admin_id: string;
+  // Add-on rows are time-boxed tier upgrades sitting on top of a licensee's
+  // existing license. Optional because rows written before the add-on
+  // migration have no value — those are base licenses.
+  grant_kind?: 'base' | 'addon' | null;
+  plan_tier?: string | null;
+  starts_at?: string | null;
+  expires_at?: string | null;
 }
 
 interface Partner {
@@ -265,6 +272,7 @@ function LicensesContent() {
                     <tr className="border-b border-[var(--border)]">
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Email</th>
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Business</th>
+                      <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Type</th>
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Status</th>
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Created</th>
                       <th className="text-right py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Actions</th>
@@ -281,6 +289,28 @@ function LicensesContent() {
                         </td>
                         <td className="py-4 px-4 text-[var(--text-secondary)]">
                           {license.business_name || '-'}
+                        </td>
+                        <td className="py-4 px-4">
+                          {/*
+                            An add-on has to be visually distinct from a
+                            license or this table reads as one person holding
+                            two licenses. The end date is the useful part —
+                            that is what the founder gets back from.
+                          */}
+                          {license.grant_kind === 'addon' ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="inline-flex w-fit items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
+                                Add-on{license.plan_tier ? ` · ${license.plan_tier}` : ''}
+                              </span>
+                              {license.expires_at ? (
+                                <span className="text-xs text-[var(--text-tertiary)]">
+                                  until {new Date(license.expires_at).toLocaleDateString()}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <span className="text-sm text-[var(--text-secondary)]">License</span>
+                          )}
                         </td>
                         <td className="py-4 px-4">
                           <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${

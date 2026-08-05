@@ -42,7 +42,7 @@ export async function GET() {
     // Get license stats from licenses table for the team (or admin if no team)
     let licensesQuery = supabase
       .from('licenses')
-      .select('id, is_activated');
+      .select('id, is_activated, grant_kind');
     
     if (teamId) {
       // If user is in a team, get all team licenses
@@ -59,8 +59,17 @@ export async function GET() {
       return NextResponse.json({ error: 'Failed to fetch license stats' }, { status: 500 });
     }
 
-    const assignedLicenses = licenses?.length || 0;
-    const activated = licenses?.filter(l => l.is_activated).length || 0;
+    // Add-ons (grant_kind = 'addon') are time-boxed tier upgrades on top of a
+    // licensee's existing license — the same person, not a new one. They must
+    // never enter the seat maths: a partner reading "12 licenses" needs that to
+    // be 12 PEOPLE, and `available` is what gates issuing the next license.
+    // Rows written before the add-on migration have no grant_kind, so the test
+    // is "not an addon" rather than "is base".
+    const baseLicenses = (licenses || []).filter(l => l.grant_kind !== 'addon');
+    const addonLicenses = (licenses || []).filter(l => l.grant_kind === 'addon');
+
+    const assignedLicenses = baseLicenses.length;
+    const activated = baseLicenses.filter(l => l.is_activated).length;
     const pending = assignedLicenses - activated;
     
     // Get purchased license count from team or admin
@@ -81,6 +90,10 @@ export async function GET() {
       activated,
       pending,
       available: availableLicenses,
+      // Reported separately so the dashboard can show them without either
+      // number lying about the other.
+      addons: addonLicenses.length,
+      addons_active: addonLicenses.filter(l => l.is_activated).length,
       // Legacy field names for backward compatibility
       total: assignedLicenses,
       purchased_license_count: purchasedLicenseCount,

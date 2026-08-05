@@ -115,7 +115,7 @@ export async function GET(request: NextRequest) {
     // Get statistics counts (separate query without filters for accurate totals)
     let statsQuery = supabase
       .from('licenses')
-      .select('id, is_activated', { count: 'exact' });
+      .select('id, is_activated, grant_kind', { count: 'exact' });
     
     if (teamId) {
       statsQuery = statsQuery.eq('team_id', teamId);
@@ -123,10 +123,18 @@ export async function GET(request: NextRequest) {
       statsQuery = statsQuery.eq('admin_id', user.id);
     }
 
-    const { data: allLicenses, count: totalLicenses } = await statsQuery;
-    
-    const assignedLicenses = totalLicenses || 0;
-    const activated = allLicenses?.filter(l => l.is_activated).length || 0;
+    const { data: allLicenses } = await statsQuery;
+
+    // Seat maths counts PEOPLE, so add-ons (time-boxed tier upgrades on top of
+    // an existing license) are excluded — `availableLicenses` is what gates
+    // issuing the next license, and counting an upgrade there would consume a
+    // seat the partner paid for. Note this deliberately uses the filtered
+    // array rather than the query's `count`, which includes add-ons.
+    const baseLicenses = (allLicenses || []).filter(l => l.grant_kind !== 'addon');
+    const addonCount = (allLicenses || []).length - baseLicenses.length;
+
+    const assignedLicenses = baseLicenses.length;
+    const activated = baseLicenses.filter(l => l.is_activated).length;
     const pending = assignedLicenses - activated;
     const purchasedLicenseCount = team?.purchased_license_count || 0;
     const availableLicenses = purchasedLicenseCount - assignedLicenses;
@@ -178,6 +186,8 @@ export async function GET(request: NextRequest) {
           activated,
           pending,
           available: availableLicenses,
+          // Reported alongside, never folded in.
+          addons: addonCount,
           // Legacy fields
           total: assignedLicenses,
         }
