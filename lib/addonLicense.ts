@@ -29,10 +29,31 @@ export interface RecordAddonInput {
 
 export interface RecordAddonResult {
   ok: boolean;
+  /** An identical row already existed (a retry). */
   alreadyRecorded?: boolean;
+  /** A live row for this tier was moved to the new end date. */
+  updated?: boolean;
+  /** endOnly was set and there was nothing live to end. */
+  notFound?: boolean;
   licenseId?: string;
   row?: Record<string, unknown>;
   error?: string;
+}
+
+export interface RecordAddonOptions {
+  /**
+   * End a live add-on instead of creating one — used when a grant is REVOKED.
+   *
+   * Without this, revoking left the mirror row untouched, so the dashboard
+   * went on showing "Market Pro until <a future date>" for a grant that no
+   * longer existed. Ending it by moving `expires_at` to now reuses the field
+   * the UI already reads, so a revoked add-on and a lapsed one look the same —
+   * which is what they are.
+   *
+   * It must never INSERT: a row created here would be a record of an add-on
+   * that was cancelled, which is the opposite of the point.
+   */
+  endOnly?: boolean;
 }
 
 /**
@@ -45,10 +66,12 @@ export interface RecordAddonResult {
 export async function recordAddonLicense(
   // The service-role client — this writes across partners by design.
   supabase: SupabaseClient,
-  input: RecordAddonInput
+  input: RecordAddonInput,
+  options: RecordAddonOptions = {}
 ): Promise<RecordAddonResult> {
   const normalizedEmail = input.email.toLowerCase();
   const expiresIso = new Date(input.expiresAt).toISOString();
+  const nowIso = new Date().toISOString();
 
   // Inherit team/partner/admin from the licensee's BASE license so the add-on
   // appears in the right partner's view. Absent is fine — a founder can be
@@ -72,6 +95,48 @@ export async function recordAddonLicense(
 
   if (existing) {
     return { ok: true, alreadyRecorded: true, licenseId: existing.id };
+  }
+
+  // A LIVE add-on of the same tier for the same person.
+  //
+  // The Moil side EXTENDS an in-force grant rather than issuing a second one,
+  // so at most one add-on per tier is ever live — and the extension arrives
+  // here with a new expiry. Keying idempotency on the expiry alone therefore
+  // inserted a second row on every extension, and the dashboard showed one
+  // person holding two Market Pro add-ons ending on different dates.
+  const { data: live } = await supabase
+    .from('licenses')
+    .select('id')
+    .eq('email', normalizedEmail)
+    .eq('grant_kind', 'addon')
+    .eq('plan_tier', input.planTier)
+    .gt('expires_at', nowIso)
+    .maybeSingle();
+
+  if (live) {
+    const { data: updated, error: updateError } = await supabase
+      .from('licenses')
+      .update({
+        expires_at: expiresIso,
+        ...(input.startsAt
+          ? { starts_at: new Date(input.startsAt).toISOString() }
+          : {}),
+      })
+      .eq('id', live.id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('[addonLicense] update failed:', updateError);
+      return { ok: false, error: 'Failed to update add-on' };
+    }
+    return { ok: true, updated: true, licenseId: live.id, row: updated };
+  }
+
+  if (options.endOnly) {
+    // Nothing live to end. Not an error — the grant may have lapsed already,
+    // or never been mirrored.
+    return { ok: true, notFound: true };
   }
 
   const { data: inserted, error: insertError } = await supabase

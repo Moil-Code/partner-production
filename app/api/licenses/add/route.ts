@@ -13,7 +13,7 @@ import {
   type LicensePlan,
   type BillingCycle,
 } from '@/lib/licensePlanDefaults';
-import { resolveIssuablePlan } from '@/lib/licenseIssuePolicy';
+import { resolveIssuablePlan, isMoilAdmin } from '@/lib/licenseIssuePolicy';
 
 export async function POST(request: Request) {
   try {
@@ -125,7 +125,33 @@ export async function POST(request: Request) {
     // An upgrade is not applied silently: it costs money and changes someone's
     // plan, so the first call returns a typed 409 describing the change and the
     // caller has to come back with `upgrade: true`.
-    const isUpgrade = !!globalLicense && upgrade === true;
+    // ── Tenancy. The lookup above is GLOBAL by design (that is what makes the
+    // duplicate check global), so it can return a license belonging to a
+    // different partner. Upgrading it would mutate another tenant's row —
+    // through the service-role client, which bypasses RLS — and the 409 below
+    // would disclose that tenant's plan. A partner may only upgrade a licensee
+    // that is theirs; Moil staff are cross-partner by definition.
+    const callerOwnsLicense =
+      !!globalLicense &&
+      (isMoilAdmin(adminData) ||
+        (teamId
+          ? globalLicense.team_id === teamId
+          : globalLicense.admin_id === user.id));
+
+    if (globalLicense && !callerOwnsLicense) {
+      // The original generic refusal, deliberately naming no plan.
+      return NextResponse.json(
+        {
+          error:
+            'This email already has a license allocated. If this is a mistake, please contact cs@moilapp.com',
+          code: 'LICENSE_EXISTS',
+          upgradable: false,
+        },
+        { status: 409 }
+      );
+    }
+
+    const isUpgrade = !!globalLicense && callerOwnsLicense && upgrade === true;
 
     if (globalLicense) {
       const currentRank = planRank(globalLicense.plan_tier, globalLicense.billing_cycle);

@@ -27,6 +27,9 @@ import { recordAddonLicense } from '@/lib/addonLicense';
  * Idempotent on (email, plan_tier, expires_at) so a retry from the caller
  * cannot leave two rows describing one grant.
  *
+ * `endOnly: true` ENDS a live add-on instead of creating one — what the Moil
+ * backend sends when a grant is revoked. It never inserts.
+ *
  * A `note` may be sent for caller symmetry and is deliberately ignored:
  * `licenses` has no free-text column, and adding one for a mirror row is not
  * worth a migration. The Moil-side grant carries it.
@@ -57,6 +60,7 @@ export async function POST(request: Request) {
       expiresAt,
       moilUserId,
       parentLicenseId,
+      endOnly,
     } = await request.json();
 
     if (!email || typeof email !== 'string' || !email.includes('@')) {
@@ -94,7 +98,7 @@ export async function POST(request: Request) {
       startsAt,
       moilUserId: typeof moilUserId === 'string' ? moilUserId : null,
       parentLicenseId: parentLicenseId || null,
-    });
+    }, { endOnly: endOnly === true });
 
     if (!result.ok) {
       return NextResponse.json(
@@ -107,6 +111,8 @@ export async function POST(request: Request) {
       {
         success: true,
         ...(result.alreadyRecorded ? { alreadyRecorded: true } : {}),
+        ...(result.updated ? { updated: true } : {}),
+        ...(result.notFound ? { notFound: true } : {}),
         license: result.row
           ? {
               id: result.row.id,

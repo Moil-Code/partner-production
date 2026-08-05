@@ -113,28 +113,41 @@ export async function GET(request: NextRequest) {
     }
 
     // Get statistics counts (separate query without filters for accurate totals)
-    let statsQuery = supabase
-      .from('licenses')
-      .select('id, is_activated, grant_kind', { count: 'exact' });
-    
-    if (teamId) {
-      statsQuery = statsQuery.eq('team_id', teamId);
-    } else {
-      statsQuery = statsQuery.eq('admin_id', user.id);
-    }
-
-    const { data: allLicenses } = await statsQuery;
-
     // Seat maths counts PEOPLE, so add-ons (time-boxed tier upgrades on top of
-    // an existing license) are excluded — `availableLicenses` is what gates
-    // issuing the next license, and counting an upgrade there would consume a
-    // seat the partner paid for. Note this deliberately uses the filtered
-    // array rather than the query's `count`, which includes add-ons.
-    const baseLicenses = (allLicenses || []).filter(l => l.grant_kind !== 'addon');
-    const addonCount = (allLicenses || []).length - baseLicenses.length;
+    // an existing license) are excluded — `availableLicenses` gates issuing the
+    // next license, and counting an upgrade there would consume a seat the
+    // partner paid for.
+    //
+    // These are EXACT head counts, not the length of a returned array.
+    // PostgREST caps rows returned (1000 by default), so counting in JS
+    // silently undercounts a large team's assigned licenses and hands them
+    // extra `available` seats they never bought. Filtering happens in SQL for
+    // the same reason.
+    const scopeColumn = teamId ? 'team_id' : 'admin_id';
+    const scopeValue = teamId ? teamId : user.id;
 
-    const assignedLicenses = baseLicenses.length;
-    const activated = baseLicenses.filter(l => l.is_activated).length;
+    const [baseCountRes, activatedCountRes, addonCountRes] = await Promise.all([
+      supabase
+        .from('licenses')
+        .select('*', { count: 'exact', head: true })
+        .eq(scopeColumn, scopeValue)
+        .eq('grant_kind', 'base'),
+      supabase
+        .from('licenses')
+        .select('*', { count: 'exact', head: true })
+        .eq(scopeColumn, scopeValue)
+        .eq('grant_kind', 'base')
+        .eq('is_activated', true),
+      supabase
+        .from('licenses')
+        .select('*', { count: 'exact', head: true })
+        .eq(scopeColumn, scopeValue)
+        .eq('grant_kind', 'addon'),
+    ]);
+
+    const assignedLicenses = baseCountRes.count || 0;
+    const activated = activatedCountRes.count || 0;
+    const addonCount = addonCountRes.count || 0;
     const pending = assignedLicenses - activated;
     const purchasedLicenseCount = team?.purchased_license_count || 0;
     const availableLicenses = purchasedLicenseCount - assignedLicenses;
