@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 import { LICENSE_PLANS, type LicensePlan } from '@/lib/licensePlanDefaults';
+import { recordAddonLicense } from '@/lib/addonLicense';
 
 /**
  * Mirror a time-boxed plan grant (add-on) issued by the Moil backend.
@@ -86,72 +87,18 @@ export async function POST(request: Request) {
       { auth: { autoRefreshToken: false, persistSession: false } }
     );
 
-    const normalizedEmail = email.toLowerCase();
+    const result = await recordAddonLicense(supabase, {
+      email,
+      planTier: planTier as LicensePlan,
+      expiresAt,
+      startsAt,
+      moilUserId: typeof moilUserId === 'string' ? moilUserId : null,
+      parentLicenseId: parentLicenseId || null,
+    });
 
-    // Inherit the licensee's team/partner/admin from their BASE license so the
-    // add-on shows up in the right partner's view. Absent is fine — a founder
-    // can be granted an add-on with no partner license here at all, and
-    // refusing that would make this mirror stricter than the system it
-    // mirrors.
-    const { data: baseLicense } = await supabase
-      .from('licenses')
-      .select('id, team_id, partner_id, admin_id, business_name, business_type')
-      .eq('email', normalizedEmail)
-      .eq('grant_kind', 'base')
-      .maybeSingle();
-
-    const expiresIso = new Date(expiresAt).toISOString();
-
-    // Idempotency: the caller retries on network failure, and two rows for one
-    // grant would double-count in every admin view.
-    const { data: existing } = await supabase
-      .from('licenses')
-      .select('id')
-      .eq('email', normalizedEmail)
-      .eq('grant_kind', 'addon')
-      .eq('plan_tier', planTier)
-      .eq('expires_at', expiresIso)
-      .maybeSingle();
-
-    if (existing) {
+    if (!result.ok) {
       return NextResponse.json(
-        {
-          success: true,
-          alreadyRecorded: true,
-          license: { id: existing.id },
-        },
-        { status: 200 }
-      );
-    }
-
-    const { data: inserted, error: insertError } = await supabase
-      .from('licenses')
-      .insert({
-        email: normalizedEmail,
-        grant_kind: 'addon',
-        plan_tier: planTier,
-        starts_at: startsAt ? new Date(startsAt).toISOString() : new Date().toISOString(),
-        expires_at: expiresIso,
-        parent_license_id: parentLicenseId || baseLicense?.id || null,
-        team_id: baseLicense?.team_id || null,
-        partner_id: baseLicense?.partner_id || null,
-        admin_id: baseLicense?.admin_id || null,
-        business_name: baseLicense?.business_name || '',
-        business_type: baseLicense?.business_type || '',
-        // An add-on is live the moment Moil issues it — there is no separate
-        // activation step, because the founder already has an account.
-        is_activated: true,
-        activated_at: new Date().toISOString(),
-        moil_user_id: typeof moilUserId === 'string' ? moilUserId : null,
-        email_status: 'not_applicable',
-      })
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error('[licenses/addon] insert failed:', insertError);
-      return NextResponse.json(
-        { error: 'Failed to record add-on' },
+        { error: result.error || 'Failed to record add-on' },
         { status: 500 }
       );
     }
@@ -159,15 +106,18 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         success: true,
-        license: {
-          id: inserted.id,
-          email: inserted.email,
-          grant_kind: inserted.grant_kind,
-          plan_tier: inserted.plan_tier,
-          starts_at: inserted.starts_at,
-          expires_at: inserted.expires_at,
-          parent_license_id: inserted.parent_license_id,
-        },
+        ...(result.alreadyRecorded ? { alreadyRecorded: true } : {}),
+        license: result.row
+          ? {
+              id: result.row.id,
+              email: result.row.email,
+              grant_kind: result.row.grant_kind,
+              plan_tier: result.row.plan_tier,
+              starts_at: result.row.starts_at,
+              expires_at: result.row.expires_at,
+              parent_license_id: result.row.parent_license_id,
+            }
+          : { id: result.licenseId },
       },
       { status: 200 }
     );

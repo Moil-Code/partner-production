@@ -11,6 +11,7 @@ import { useToast } from '@/components/ui/toast/use-toast';
 import Logo from '@/components/ui/Logo';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
 import { ConfirmationModal } from '@/components/ui/confirmation-modal';
+import { GrantAddonModal } from '@/components/Dashboard/GrantAddonModal';
 import { useAuthStore, usePartnerStore, useTeamStore, useUIStore } from '@/lib/stores';
 import {
   LICENSE_PLANS,
@@ -45,7 +46,8 @@ import {
   Edit2,
   Check,
   Trash2,
-  Send
+  Send,
+  Sparkles,
 } from 'lucide-react';
 
 interface Partner {
@@ -95,6 +97,7 @@ export default function MoilAdminDashboard() {
   const [licensePlan, setLicensePlan] = React.useState<LicensePlan | ''>('');
   const [licenseBillingCycle, setLicenseBillingCycle] = React.useState<BillingCycle>('yearly');
   const [licenseMonths, setLicenseMonths] = React.useState<string>('');
+  const [showGrantAddonModal, setShowGrantAddonModal] = React.useState(false);
   // Set when the API reports the email already holds a lower-tier license.
   const [upgradePrompt, setUpgradePrompt] = React.useState<{
     email: string;
@@ -1203,10 +1206,22 @@ export default function MoilAdminDashboard() {
                   <CardTitle className="text-[var(--text-primary)]">Licenses</CardTitle>
                   <CardDescription>All licenses created from your Moil admin account</CardDescription>
                 </div>
-                <Button onClick={() => setShowAddLicenseModal(true)}>
-                  <Plus className="w-4 h-4 mr-2" />
-                  Add License
-                </Button>
+                <div className="flex items-center gap-2">
+                  {/*
+                    Two different actions, deliberately side by side and
+                    deliberately labelled differently: a license is what
+                    someone is on, an add-on sits on top of it for N months
+                    and then expires by itself.
+                  */}
+                  <Button variant="outline" onClick={() => setShowGrantAddonModal(true)}>
+                    <Sparkles className="w-4 h-4 mr-2" />
+                    Grant Add-on
+                  </Button>
+                  <Button onClick={() => setShowAddLicenseModal(true)}>
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add License
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent>
@@ -1492,6 +1507,12 @@ export default function MoilAdminDashboard() {
           </div>
         </div>
       )}
+
+      <GrantAddonModal
+        isOpen={showGrantAddonModal}
+        onClose={() => setShowGrantAddonModal(false)}
+        onGranted={fetchLicenses}
+      />
 
       {/*
         Upgrade confirmation. The API refuses to change an existing licensee's

@@ -397,6 +397,23 @@ Idempotent on `(email, plan_tier, expires_at)` — a retry returns
 | 401 | Wrong or missing API key |
 | 503 | `MOIL_INTERNAL_API_KEY` not configured on the server |
 
+### Granting an add-on from the dashboard
+
+`/api/licenses/addon` is the machine-to-machine record-keeping endpoint above.
+Moil staff granting an add-on by hand use **`POST /api/licenses/grant-addon`**,
+which is session-authenticated (`moil_admin` only, no shared secret) and does
+the whole job:
+
+1. calls the Moil backend's `/api/employer/grant_plan_addon` — **authoritative**,
+   and if it refuses, nothing is written here, because a local row for a grant
+   that does not exist tells an admin the licensee has Market Pro when they do
+   not;
+2. records the mirror row through the same writer as `/addon`.
+
+Body: `{ email, planTier, months, note? }`. A licensee with no Moil account yet
+comes back `pending: true` — the grant is parked and its clock starts when they
+create their profile, so there is no end date to show.
+
 ### Add-ons and seat counts
 
 Add-on rows carry `grant_kind = 'addon'` and are **excluded from every seat

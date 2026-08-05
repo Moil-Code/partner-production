@@ -9,6 +9,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { useToast } from '@/components/ui/toast/use-toast';
 import Logo from '@/components/ui/Logo';
 import { LicenseRowActions } from '@/components/Dashboard/LicenseRowActions';
+import { GrantAddonModal } from '@/components/Dashboard/GrantAddonModal';
 import {
   ArrowLeft,
   Key,
@@ -16,7 +17,8 @@ import {
   Mail,
   CheckCircle,
   Clock,
-  Building2
+  Building2,
+  Sparkles
 } from 'lucide-react';
 
 interface License {
@@ -54,6 +56,10 @@ function LicensesContent() {
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [partner, setPartner] = useState<Partner | null>(null);
   const [licenses, setLicenses] = useState<License[]>([]);
+  // Which licensee the add-on modal is open for. An add-on always targets a
+  // specific person, so it is opened from their row rather than from a
+  // free-floating button.
+  const [addonFor, setAddonFor] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
@@ -325,6 +331,17 @@ function LicensesContent() {
                           {new Date(license.created_at).toLocaleDateString()}
                         </td>
                         <td className="py-4 px-4 text-right">
+                          {license.grant_kind !== 'addon' && (
+                            <button
+                              type="button"
+                              onClick={() => setAddonFor(license.email)}
+                              className="mr-2 inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
+                              title="Give this licensee a higher tier for a set number of months"
+                            >
+                              <Sparkles className="h-3.5 w-3.5" />
+                              Add-on
+                            </button>
+                          )}
                           <LicenseRowActions
                             license={license}
                             onChanged={checkAuthAndFetchData}
@@ -339,6 +356,13 @@ function LicensesContent() {
           </CardContent>
         </Card>
       </div>
+
+      <GrantAddonModal
+        isOpen={!!addonFor}
+        email={addonFor || undefined}
+        onClose={() => setAddonFor(null)}
+        onGranted={checkAuthAndFetchData}
+      />
     </div>
   );
 }
