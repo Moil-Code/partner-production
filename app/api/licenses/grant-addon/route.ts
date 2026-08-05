@@ -30,7 +30,13 @@ import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
  *
  * ACCESS: `moil_admin` only. A grant hands out Moil's premium AI spend, so it
  * is not a partner-admin capability — partner admins issuing their own
- * licenses go through /api/licenses/add.
+ * licenses go through /api/licenses/add. The resulting row is invisible to the
+ * partner as well (see lib/addonLicense.ts): they did not issue it and are not
+ * billed for it.
+ *
+ * ELIGIBILITY: the founder must already hold an ACTIVATED license. The Moil
+ * backend enforces that and answers `not_eligible`; nothing is stored for
+ * someone who has not signed up or not activated.
  */
 export async function POST(request: Request) {
   try {
@@ -98,6 +104,7 @@ export async function POST(request: Request) {
       grantId?: string;
       moil_user_id?: string;
       message?: string;
+      reason?: string;
     };
 
     let moilResult: MoilGrantResult | null = null;
@@ -158,20 +165,21 @@ export async function POST(request: Request) {
       );
     }
 
-    // The licensee has no Moil account yet, so the grant is parked and its
-    // clock starts when they sign up. There is no end date to mirror, and
-    // inventing one would put a wrong date in front of an admin.
-    if (moilResult.status === 'pending_claim') {
+    // An add-on tops up a license that is ALREADY ACTIVE — it widens what a
+    // live license can do, so it needs one to sit on. The Moil backend refuses
+    // anyone who has not signed up, has no employer profile, or has not
+    // activated, and nothing is stored anywhere: those founders go through the
+    // ordinary license-assignment flow, which already invites and enrols them.
+    if (moilResult.status === 'not_eligible') {
       return NextResponse.json(
         {
-          success: true,
-          pending: true,
-          message:
+          error:
             moilResult.message ||
-            'Stored. It activates when they create their Moil profile, and the clock starts then.',
-          result: moilResult,
+            'This person does not have an active license to add to.',
+          code: 'NOT_ELIGIBLE',
+          reason: moilResult.reason || null,
         },
-        { status: 200 }
+        { status: 409 }
       );
     }
 

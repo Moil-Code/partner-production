@@ -125,20 +125,21 @@ export async function POST(request: Request) {
     // An upgrade is not applied silently: it costs money and changes someone's
     // plan, so the first call returns a typed 409 describing the change and the
     // caller has to come back with `upgrade: true`.
-    // ── Tenancy. The lookup above is GLOBAL by design (that is what makes the
-    // duplicate check global), so it can return a license belonging to a
-    // different partner. Upgrading it would mutate another tenant's row —
-    // through the service-role client, which bypasses RLS — and the 409 below
-    // would disclose that tenant's plan. A partner may only upgrade a licensee
-    // that is theirs; Moil staff are cross-partner by definition.
-    const callerOwnsLicense =
-      !!globalLicense &&
-      (isMoilAdmin(adminData) ||
-        (teamId
-          ? globalLicense.team_id === teamId
-          : globalLicense.admin_id === user.id));
+    // ── UPGRADES ARE MOIL-ONLY. ────────────────────────────────────────────
+    //
+    // Partners issue Starter Annual and nothing else (see
+    // lib/licenseIssuePolicy.ts); changing what an existing licensee is on is
+    // not a partner capability at all, so they get the same flat refusal they
+    // always did.
+    //
+    // The security half matters too: the lookup above is GLOBAL by design —
+    // that is what makes the duplicate check global — so it can return a
+    // license belonging to a DIFFERENT partner, and the row is updated through
+    // the service-role client, which bypasses RLS. Gating on Moil staff closes
+    // both at once. It also stops the 409 disclosing another tenant's plan.
+    const callerMayUpgrade = isMoilAdmin(adminData);
 
-    if (globalLicense && !callerOwnsLicense) {
+    if (globalLicense && !callerMayUpgrade) {
       // The original generic refusal, deliberately naming no plan.
       return NextResponse.json(
         {
@@ -151,7 +152,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const isUpgrade = !!globalLicense && callerOwnsLicense && upgrade === true;
+    const isUpgrade = !!globalLicense && callerMayUpgrade && upgrade === true;
 
     if (globalLicense) {
       const currentRank = planRank(globalLicense.plan_tier, globalLicense.billing_cycle);

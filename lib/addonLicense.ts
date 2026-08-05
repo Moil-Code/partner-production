@@ -73,10 +73,8 @@ export async function recordAddonLicense(
   const expiresIso = new Date(input.expiresAt).toISOString();
   const nowIso = new Date().toISOString();
 
-  // Inherit team/partner/admin from the licensee's BASE license so the add-on
-  // appears in the right partner's view. Absent is fine — a founder can be
-  // granted an add-on with no partner license here at all, and refusing that
-  // would make this mirror stricter than the system it mirrors.
+  // The licensee's BASE license — the partner they came in through, which the
+  // Moil dashboard shows alongside the add-on.
   const { data: baseLicense } = await supabase
     .from('licenses')
     .select('id, team_id, partner_id, admin_id, business_name, business_type')
@@ -150,9 +148,23 @@ export async function recordAddonLicense(
         : new Date().toISOString(),
       expires_at: expiresIso,
       parent_license_id: input.parentLicenseId || baseLicense?.id || null,
-      team_id: baseLicense?.team_id || null,
+
+      // ── INVISIBLE TO THE PARTNER, ON PURPOSE. ────────────────────────────
+      //
+      // An add-on is something MOIL gives a founder; the partner did not issue
+      // it, is not billed for it, and must not see it. Every partner-facing
+      // read — /api/licenses/list, /stats, /export, the admin dashboard —
+      // scopes by `team_id` (or `admin_id` when the admin has no team), so
+      // leaving both NULL is what keeps these rows out of those views. It is
+      // also why they can never touch a partner's seat maths.
+      //
+      // `partner_id` IS kept: the Moil dashboard shows which partner the
+      // founder originally came in through, and the moil-admin licenses page
+      // is scoped by partner_id, so this is what makes the add-on visible
+      // there and nowhere else.
+      team_id: null,
+      admin_id: null,
       partner_id: baseLicense?.partner_id || null,
-      admin_id: baseLicense?.admin_id || null,
       business_name: baseLicense?.business_name || '',
       business_type: baseLicense?.business_type || '',
       // An add-on is live the moment Moil issues it — there is no separate

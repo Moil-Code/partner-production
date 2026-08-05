@@ -98,6 +98,18 @@ export default function MoilAdminDashboard() {
   const [licenseBillingCycle, setLicenseBillingCycle] = React.useState<BillingCycle>('yearly');
   const [licenseMonths, setLicenseMonths] = React.useState<string>('');
   const [showGrantAddonModal, setShowGrantAddonModal] = React.useState(false);
+  // Add-ons never appear in the license list: their rows carry no team_id or
+  // admin_id, which is what keeps them out of every partner-scoped read. They
+  // are fetched separately so the Moil dashboard can still show them.
+  const [addons, setAddons] = React.useState<Array<{
+    id: string;
+    email: string;
+    planTier: string;
+    expiresAt: string | null;
+    active: boolean;
+    partnerName: string | null;
+    basePlan: { planTier: string | null; billingCycle: string | null } | null;
+  }>>([]);
   // Set when the API reports the email already holds a lower-tier license.
   const [upgradePrompt, setUpgradePrompt] = React.useState<{
     email: string;
@@ -173,6 +185,17 @@ export default function MoilAdminDashboard() {
     }
   }, [isMoilAdmin, activeTab, admin?.id]);
 
+  const fetchAddons = async () => {
+    try {
+      const response = await fetch('/api/licenses/addons');
+      const data = await response.json();
+      if (response.ok) setAddons(data.addons || []);
+    } catch (error) {
+      // Non-fatal: the licenses table is the primary content of this tab.
+      console.error('Error fetching add-ons:', error);
+    }
+  };
+
   const fetchLicenses = async () => {
     setLicensesLoading(true);
     try {
@@ -184,6 +207,7 @@ export default function MoilAdminDashboard() {
       }
       
       setLicenses(data.licenses || []);
+      fetchAddons();
     } catch (error) {
       console.error('Error fetching licenses:', error);
       toast({
@@ -1225,6 +1249,67 @@ export default function MoilAdminDashboard() {
               </div>
             </CardHeader>
             <CardContent>
+              {/*
+                Granted add-ons. Shown here because these rows deliberately
+                carry no team_id/admin_id — that is what keeps them out of the
+                partner's own views — so the license list below, which is
+                scoped by admin_id, can never surface them.
+
+                Each row names the partner the founder came in through and the
+                date the extra access ends, which together are the two things
+                an admin needs to answer "why does this person have Market Pro
+                and when does it stop".
+              */}
+              {addons.length > 0 && (
+                <div className="mb-6 rounded-xl border border-violet-200 bg-violet-50/50 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Sparkles className="w-4 h-4 text-violet-700" />
+                    <h3 className="font-semibold text-[var(--text-primary)]">
+                      Granted add-ons ({addons.filter((a) => a.active).length} active)
+                    </h3>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-violet-200/70">
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Email</th>
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Add-on</th>
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Ends</th>
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Their partner</th>
+                          <th className="text-left py-2 font-medium text-[var(--text-secondary)]">Base license</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {addons.map((a) => (
+                          <tr key={a.id} className="border-b border-violet-100 last:border-0">
+                            <td className="py-2 pr-4 text-[var(--text-primary)]">{a.email}</td>
+                            <td className="py-2 pr-4">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
+                                {a.planTier}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-4 text-[var(--text-secondary)]">
+                              {a.expiresAt ? new Date(a.expiresAt).toLocaleDateString() : '—'}
+                              {!a.active && (
+                                <span className="ml-1 text-xs text-[var(--text-tertiary)]">(ended)</span>
+                              )}
+                            </td>
+                            <td className="py-2 pr-4 text-[var(--text-secondary)]">
+                              {a.partnerName || 'Moil'}
+                            </td>
+                            <td className="py-2 text-[var(--text-secondary)]">
+                              {a.basePlan?.planTier
+                                ? `${a.basePlan.planTier}${a.basePlan.billingCycle ? ` · ${a.basePlan.billingCycle}` : ''}`
+                                : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {licensesLoading ? (
                 <div className="text-center py-12">
                   <Spinner size="lg" variant="primary" className="mx-auto" />
@@ -1511,7 +1596,7 @@ export default function MoilAdminDashboard() {
       <GrantAddonModal
         isOpen={showGrantAddonModal}
         onClose={() => setShowGrantAddonModal(false)}
-        onGranted={fetchLicenses}
+        onGranted={fetchAddons}
       />
 
       {/*

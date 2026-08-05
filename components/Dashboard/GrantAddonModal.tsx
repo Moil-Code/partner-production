@@ -86,7 +86,7 @@ export function GrantAddonModal({
       }
 
       toast({
-        title: data.pending ? 'Add-on stored' : 'Add-on granted',
+        title: 'Add-on granted',
         description:
           // `mirrored: false` means the grant IS live on Moil but this
           // dashboard has not recorded it. Saying so beats a clean success
@@ -137,7 +137,9 @@ export function GrantAddonModal({
           <strong className="font-medium text-[var(--text-primary)]">
             Their current license keeps running underneath
           </strong>{' '}
-          and they go back to it when the add-on ends. No seat is used.
+          and they go back to it when the add-on ends. They must have already
+          activated that license. No seat is used, and the partner does not see
+          this.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
