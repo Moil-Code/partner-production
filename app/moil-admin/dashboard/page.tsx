@@ -11,6 +11,7 @@ import { useToast } from '@/components/ui/toast/use-toast';
 import Logo from '@/components/ui/Logo';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
 import { ConfirmationModal } from '@/components/ui/confirmation-modal';
+import { GrantAddonModal } from '@/components/Dashboard/GrantAddonModal';
 import { useAuthStore, usePartnerStore, useTeamStore, useUIStore } from '@/lib/stores';
 import {
   LICENSE_PLANS,
@@ -45,7 +46,8 @@ import {
   Edit2,
   Check,
   Trash2,
-  Send
+  Send,
+  Sparkles,
 } from 'lucide-react';
 
 interface Partner {
@@ -95,6 +97,26 @@ export default function MoilAdminDashboard() {
   const [licensePlan, setLicensePlan] = React.useState<LicensePlan | ''>('');
   const [licenseBillingCycle, setLicenseBillingCycle] = React.useState<BillingCycle>('yearly');
   const [licenseMonths, setLicenseMonths] = React.useState<string>('');
+  const [showGrantAddonModal, setShowGrantAddonModal] = React.useState(false);
+  // Add-ons never appear in the license list: their rows carry no team_id or
+  // admin_id, which is what keeps them out of every partner-scoped read. They
+  // are fetched separately so the Moil dashboard can still show them.
+  const [addons, setAddons] = React.useState<Array<{
+    id: string;
+    email: string;
+    planTier: string;
+    expiresAt: string | null;
+    active: boolean;
+    partnerName: string | null;
+    basePlan: { planTier: string | null; billingCycle: string | null } | null;
+  }>>([]);
+  // Set when the API reports the email already holds a lower-tier license.
+  const [upgradePrompt, setUpgradePrompt] = React.useState<{
+    email: string;
+    monthsValue?: number;
+    currentDisplay: string;
+    requestedDisplay: string;
+  } | null>(null);
   const [addingLicense, setAddingLicense] = React.useState(false);
 
   const resetAddLicenseForm = () => {
@@ -102,6 +124,7 @@ export default function MoilAdminDashboard() {
     setLicensePlan('');
     setLicenseBillingCycle('yearly');
     setLicenseMonths('');
+    setUpgradePrompt(null);
   };
   const [licenses, setLicenses] = React.useState<any[]>([]);
   const [licensesLoading, setLicensesLoading] = React.useState(false);
@@ -162,6 +185,17 @@ export default function MoilAdminDashboard() {
     }
   }, [isMoilAdmin, activeTab, admin?.id]);
 
+  const fetchAddons = async () => {
+    try {
+      const response = await fetch('/api/licenses/addons');
+      const data = await response.json();
+      if (response.ok) setAddons(data.addons || []);
+    } catch (error) {
+      // Non-fatal: the licenses table is the primary content of this tab.
+      console.error('Error fetching add-ons:', error);
+    }
+  };
+
   const fetchLicenses = async () => {
     setLicensesLoading(true);
     try {
@@ -173,6 +207,7 @@ export default function MoilAdminDashboard() {
       }
       
       setLicenses(data.licenses || []);
+      fetchAddons();
     } catch (error) {
       console.error('Error fetching licenses:', error);
       toast({
@@ -367,37 +402,72 @@ export default function MoilAdminDashboard() {
       monthsValue = n;
     }
 
+    await submitLicense({ email: licenseEmail.trim().toLowerCase(), monthsValue, upgrade: false });
+  };
+
+  /**
+   * Shared submit for both "add" and "upgrade".
+   *
+   * A licensee who already holds a license comes back as a 409 with
+   * `code: 'UPGRADE_AVAILABLE'` rather than a flat refusal. We do NOT resubmit
+   * automatically — an upgrade costs money and changes someone's plan, so the
+   * admin confirms first and the second call carries `upgrade: true`.
+   */
+  const submitLicense = async ({
+    email,
+    monthsValue,
+    upgrade,
+  }: {
+    email: string;
+    monthsValue?: number;
+    upgrade: boolean;
+  }) => {
     setAddingLicense(true);
     try {
       const response = await fetch('/api/licenses/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: licenseEmail.trim().toLowerCase(),
-          adminId: admin.id,
+          email,
+          adminId: admin?.id,
           plan: licensePlan,
           billingCycle: licenseBillingCycle,
           ...(monthsValue !== undefined && { months: monthsValue }),
+          ...(upgrade ? { upgrade: true } : {}),
         }),
       });
 
       const data = await response.json();
 
+      // Already licensed, and the requested plan is HIGHER — offer the upgrade.
+      if (response.status === 409 && data.code === 'UPGRADE_AVAILABLE') {
+        setUpgradePrompt({
+          email,
+          monthsValue,
+          currentDisplay: data.currentPlan?.display || 'their current plan',
+          requestedDisplay: data.requestedPlan?.display || 'the selected plan',
+        });
+        return;
+      }
+
       if (data.error) {
         toast({
-          title: 'Error',
+          title: response.status === 409 ? 'Already Licensed' : 'Error',
           description: data.error,
-          type: 'error',
+          type: response.status === 409 ? 'warning' : 'error',
         });
         return;
       }
 
       toast({
-        title: 'License Added',
-        description: `License created and activation email sent to ${licenseEmail}`,
+        title: data.upgraded ? 'License Upgraded' : 'License Added',
+        description: data.upgraded
+          ? `${email} is now on ${data.license?.planDisplay || 'the new plan'}.`
+          : `License created and activation email sent to ${email}`,
         type: 'success',
       });
 
+      setUpgradePrompt(null);
       resetAddLicenseForm();
       setShowAddLicenseModal(false);
 
@@ -1160,13 +1230,86 @@ export default function MoilAdminDashboard() {
                   <CardTitle className="text-[var(--text-primary)]">Licenses</CardTitle>
                   <CardDescription>All licenses created from your Moil admin account</CardDescription>
                 </div>
-                <Button onClick={() => setShowAddLicenseModal(true)}>
-                  <Plus className="w-4 h-4 mr-2" />
-                  Add License
-                </Button>
+                <div className="flex items-center gap-2">
+                  {/*
+                    Two different actions, deliberately side by side and
+                    deliberately labelled differently: a license is what
+                    someone is on, an add-on sits on top of it for N months
+                    and then expires by itself.
+                  */}
+                  <Button variant="outline" onClick={() => setShowGrantAddonModal(true)}>
+                    <Sparkles className="w-4 h-4 mr-2" />
+                    Grant Add-on
+                  </Button>
+                  <Button onClick={() => setShowAddLicenseModal(true)}>
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add License
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent>
+              {/*
+                Granted add-ons. Shown here because these rows deliberately
+                carry no team_id/admin_id — that is what keeps them out of the
+                partner's own views — so the license list below, which is
+                scoped by admin_id, can never surface them.
+
+                Each row names the partner the founder came in through and the
+                date the extra access ends, which together are the two things
+                an admin needs to answer "why does this person have Market Pro
+                and when does it stop".
+              */}
+              {addons.length > 0 && (
+                <div className="mb-6 rounded-xl border border-violet-200 bg-violet-50/50 p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Sparkles className="w-4 h-4 text-violet-700" />
+                    <h3 className="font-semibold text-[var(--text-primary)]">
+                      Granted add-ons ({addons.filter((a) => a.active).length} active)
+                    </h3>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-violet-200/70">
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Email</th>
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Add-on</th>
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Ends</th>
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Their partner</th>
+                          <th className="text-left py-2 font-medium text-[var(--text-secondary)]">Base license</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {addons.map((a) => (
+                          <tr key={a.id} className="border-b border-violet-100 last:border-0">
+                            <td className="py-2 pr-4 text-[var(--text-primary)]">{a.email}</td>
+                            <td className="py-2 pr-4">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
+                                {a.planTier}
+                              </span>
+                            </td>
+                            <td className="py-2 pr-4 text-[var(--text-secondary)]">
+                              {a.expiresAt ? new Date(a.expiresAt).toLocaleDateString() : '—'}
+                              {!a.active && (
+                                <span className="ml-1 text-xs text-[var(--text-tertiary)]">(ended)</span>
+                              )}
+                            </td>
+                            <td className="py-2 pr-4 text-[var(--text-secondary)]">
+                              {a.partnerName || 'Moil'}
+                            </td>
+                            <td className="py-2 text-[var(--text-secondary)]">
+                              {a.basePlan?.planTier
+                                ? `${a.basePlan.planTier}${a.basePlan.billingCycle ? ` · ${a.basePlan.billingCycle}` : ''}`
+                                : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {licensesLoading ? (
                 <div className="text-center py-12">
                   <Spinner size="lg" variant="primary" className="mx-auto" />
@@ -1449,6 +1592,40 @@ export default function MoilAdminDashboard() {
           </div>
         </div>
       )}
+
+      <GrantAddonModal
+        isOpen={showGrantAddonModal}
+        onClose={() => setShowGrantAddonModal(false)}
+        onGranted={fetchAddons}
+      />
+
+      {/*
+        Upgrade confirmation. The API refuses to change an existing licensee's
+        plan without this second, explicit call — an upgrade costs money and
+        changes what someone is paying for, so it is never applied as a side
+        effect of pressing "Add License".
+      */}
+      <ConfirmationModal
+        isOpen={!!upgradePrompt}
+        onClose={() => setUpgradePrompt(null)}
+        onConfirm={() => {
+          if (!upgradePrompt) return;
+          submitLicense({
+            email: upgradePrompt.email,
+            monthsValue: upgradePrompt.monthsValue,
+            upgrade: true,
+          });
+        }}
+        title="Upgrade this license?"
+        description={
+          upgradePrompt
+            ? `${upgradePrompt.email} already has ${upgradePrompt.currentDisplay}. Upgrading moves them to ${upgradePrompt.requestedDisplay} — their existing license is replaced, not duplicated, and no extra seat is used.`
+            : ''
+        }
+        confirmText="Upgrade"
+        variant="warning"
+        isLoading={addingLicense}
+      />
 
       {/* Confirmation Modal */}
       <ConfirmationModal

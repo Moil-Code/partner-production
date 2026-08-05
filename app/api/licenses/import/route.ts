@@ -2,10 +2,10 @@ import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { sendBatchLicenseActivationEmails } from '@/lib/email';
 import {
-  parseLicensePlanDefaults,
   parsePlanKey,
   type LicensePlanDefaults,
 } from '@/lib/licensePlanDefaults';
+import { resolveIssuablePlan } from '@/lib/licenseIssuePolicy';
 
 export async function POST(request: Request) {
   try {
@@ -95,7 +95,9 @@ export async function POST(request: Request) {
       const { count: assignedCount } = await supabase
         .from('licenses')
         .select('*', { count: 'exact', head: true })
-        .eq('team_id', teamId);
+        .eq('team_id', teamId)
+        // Add-ons upgrade an existing licensee; they consume no seat.
+        .eq('grant_kind', 'base');
 
       const availableLicenses = (team.purchased_license_count || 0) - (assignedCount || 0);
 
@@ -118,7 +120,9 @@ export async function POST(request: Request) {
     const { data: existingLicenses } = await adminSupabase
       .from('licenses')
       .select('email')
-      .in('email', lowercaseEmails);
+      .in('email', lowercaseEmails)
+      // BASE licenses only — see the note in /api/licenses/add.
+      .eq('grant_kind', 'base');
 
     const licensedEmails = new Set(existingLicenses?.map(l => l.email) || []);
 
@@ -147,7 +151,8 @@ export async function POST(request: Request) {
         let existingQuery = supabase
           .from('licenses')
           .select('id')
-          .eq('email', email.toLowerCase());
+          .eq('email', email.toLowerCase())
+          .eq('grant_kind', 'base');
 
         if (teamId) {
           existingQuery = existingQuery.eq('team_id', teamId);
@@ -184,13 +189,18 @@ export async function POST(request: Request) {
     const moilResultByEmail = new Map<string, MoilResult>();
     let planDefaults: LicensePlanDefaults | null = null;
     if (planFromForm !== null && planFromForm !== '') {
-      const planParse = parseLicensePlanDefaults({
+      // Same rule as /api/licenses/add: partners issue Starter Annual and only
+      // that, Moil staff pick. This route accepted whatever the form sent with
+      // no role check at all, so a partner-admin CSV import naming market_pro
+      // would have been honoured — the one place a plan could be chosen
+      // without anyone having offered the choice.
+      const planParse = resolveIssuablePlan(admin, {
         plan: planFromForm,
         billingCycle: formData.get('billingCycle'),
         months: formData.get('months'),
       });
       if (!planParse.ok) {
-        return NextResponse.json({ error: planParse.error }, { status: 400 });
+        return NextResponse.json({ error: planParse.error }, { status: planParse.status });
       }
       planDefaults = planParse.defaults;
 

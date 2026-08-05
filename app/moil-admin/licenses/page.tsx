@@ -9,6 +9,7 @@ import { Spinner } from '@/components/ui/spinner';
 import { useToast } from '@/components/ui/toast/use-toast';
 import Logo from '@/components/ui/Logo';
 import { LicenseRowActions } from '@/components/Dashboard/LicenseRowActions';
+import { GrantAddonModal } from '@/components/Dashboard/GrantAddonModal';
 import {
   ArrowLeft,
   Key,
@@ -16,7 +17,8 @@ import {
   Mail,
   CheckCircle,
   Clock,
-  Building2
+  Building2,
+  Sparkles
 } from 'lucide-react';
 
 interface License {
@@ -28,6 +30,13 @@ interface License {
   activated_at: string | null;
   team_id: string | null;
   admin_id: string;
+  // Add-on rows are time-boxed tier upgrades sitting on top of a licensee's
+  // existing license. Optional because rows written before the add-on
+  // migration have no value — those are base licenses.
+  grant_kind?: 'base' | 'addon' | null;
+  plan_tier?: string | null;
+  starts_at?: string | null;
+  expires_at?: string | null;
 }
 
 interface Partner {
@@ -47,6 +56,10 @@ function LicensesContent() {
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [partner, setPartner] = useState<Partner | null>(null);
   const [licenses, setLicenses] = useState<License[]>([]);
+  // Which licensee the add-on modal is open for. An add-on always targets a
+  // specific person, so it is opened from their row rather than from a
+  // free-floating button.
+  const [addonFor, setAddonFor] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
@@ -265,6 +278,7 @@ function LicensesContent() {
                     <tr className="border-b border-[var(--border)]">
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Email</th>
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Business</th>
+                      <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Type</th>
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Status</th>
                       <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Created</th>
                       <th className="text-right py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Actions</th>
@@ -283,6 +297,28 @@ function LicensesContent() {
                           {license.business_name || '-'}
                         </td>
                         <td className="py-4 px-4">
+                          {/*
+                            An add-on has to be visually distinct from a
+                            license or this table reads as one person holding
+                            two licenses. The end date is the useful part —
+                            that is what the founder gets back from.
+                          */}
+                          {license.grant_kind === 'addon' ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="inline-flex w-fit items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800">
+                                Add-on{license.plan_tier ? ` · ${license.plan_tier}` : ''}
+                              </span>
+                              {license.expires_at ? (
+                                <span className="text-xs text-[var(--text-tertiary)]">
+                                  until {new Date(license.expires_at).toLocaleDateString()}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <span className="text-sm text-[var(--text-secondary)]">License</span>
+                          )}
+                        </td>
+                        <td className="py-4 px-4">
                           <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
                             license.is_activated 
                               ? 'bg-green-100 text-green-800' 
@@ -295,6 +331,17 @@ function LicensesContent() {
                           {new Date(license.created_at).toLocaleDateString()}
                         </td>
                         <td className="py-4 px-4 text-right">
+                          {license.grant_kind !== 'addon' && (
+                            <button
+                              type="button"
+                              onClick={() => setAddonFor(license.email)}
+                              className="mr-2 inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
+                              title="Give this licensee a higher tier for a set number of months"
+                            >
+                              <Sparkles className="h-3.5 w-3.5" />
+                              Add-on
+                            </button>
+                          )}
                           <LicenseRowActions
                             license={license}
                             onChanged={checkAuthAndFetchData}
@@ -309,6 +356,13 @@ function LicensesContent() {
           </CardContent>
         </Card>
       </div>
+
+      <GrantAddonModal
+        isOpen={!!addonFor}
+        email={addonFor || undefined}
+        onClose={() => setAddonFor(null)}
+        onGranted={checkAuthAndFetchData}
+      />
     </div>
   );
 }

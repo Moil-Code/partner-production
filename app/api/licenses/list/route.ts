@@ -113,20 +113,41 @@ export async function GET(request: NextRequest) {
     }
 
     // Get statistics counts (separate query without filters for accurate totals)
-    let statsQuery = supabase
-      .from('licenses')
-      .select('id, is_activated', { count: 'exact' });
-    
-    if (teamId) {
-      statsQuery = statsQuery.eq('team_id', teamId);
-    } else {
-      statsQuery = statsQuery.eq('admin_id', user.id);
-    }
+    // Seat maths counts PEOPLE, so add-ons (time-boxed tier upgrades on top of
+    // an existing license) are excluded — `availableLicenses` gates issuing the
+    // next license, and counting an upgrade there would consume a seat the
+    // partner paid for.
+    //
+    // These are EXACT head counts, not the length of a returned array.
+    // PostgREST caps rows returned (1000 by default), so counting in JS
+    // silently undercounts a large team's assigned licenses and hands them
+    // extra `available` seats they never bought. Filtering happens in SQL for
+    // the same reason.
+    const scopeColumn = teamId ? 'team_id' : 'admin_id';
+    const scopeValue = teamId ? teamId : user.id;
 
-    const { data: allLicenses, count: totalLicenses } = await statsQuery;
-    
-    const assignedLicenses = totalLicenses || 0;
-    const activated = allLicenses?.filter(l => l.is_activated).length || 0;
+    const [baseCountRes, activatedCountRes, addonCountRes] = await Promise.all([
+      supabase
+        .from('licenses')
+        .select('*', { count: 'exact', head: true })
+        .eq(scopeColumn, scopeValue)
+        .eq('grant_kind', 'base'),
+      supabase
+        .from('licenses')
+        .select('*', { count: 'exact', head: true })
+        .eq(scopeColumn, scopeValue)
+        .eq('grant_kind', 'base')
+        .eq('is_activated', true),
+      supabase
+        .from('licenses')
+        .select('*', { count: 'exact', head: true })
+        .eq(scopeColumn, scopeValue)
+        .eq('grant_kind', 'addon'),
+    ]);
+
+    const assignedLicenses = baseCountRes.count || 0;
+    const activated = activatedCountRes.count || 0;
+    const addonCount = addonCountRes.count || 0;
     const pending = assignedLicenses - activated;
     const purchasedLicenseCount = team?.purchased_license_count || 0;
     const availableLicenses = purchasedLicenseCount - assignedLicenses;
@@ -178,6 +199,8 @@ export async function GET(request: NextRequest) {
           activated,
           pending,
           available: availableLicenses,
+          // Reported alongside, never folded in.
+          addons: addonCount,
           // Legacy fields
           total: assignedLicenses,
         }

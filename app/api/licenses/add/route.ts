@@ -6,16 +6,19 @@ import {
   sendLicenseActivatedEmail,
   type EdcEmailInfo,
 } from '@/lib/email';
-import { parsePlanKey } from '@/lib/licensePlanDefaults';
-
-// All partner-issued licenses grant exactly this plan.
-const PARTNER_PLAN_DEFAULTS = { plan: 'standard', billingCycle: 'yearly' };
-const PARTNER_PLAN_DISPLAY = 'Standard Annual';
+import {
+  parsePlanKey,
+  describePlan,
+  planRank,
+  type LicensePlan,
+  type BillingCycle,
+} from '@/lib/licensePlanDefaults';
+import { resolveIssuablePlan, isMoilAdmin } from '@/lib/licenseIssuePolicy';
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { email } = body;
+    const { email, upgrade } = body;
 
     if (!email || !email.includes('@')) {
       return NextResponse.json(
@@ -40,6 +43,28 @@ export async function POST(request: Request) {
     if (adminError || !adminData) {
       return NextResponse.json({ error: 'Access denied. Admin account required.' }, { status: 403 });
     }
+
+    // Which plan this caller is allowed to issue. Partners issue Starter
+    // Annual and only that; Moil staff pick. Enforced server-side because the
+    // partner dashboard simply not rendering a picker is not a control — see
+    // lib/licenseIssuePolicy.ts.
+    const planResolution = resolveIssuablePlan(adminData, {
+      plan: body.plan,
+      billingCycle: body.billingCycle,
+      months: body.months,
+    });
+    if (!planResolution.ok) {
+      return NextResponse.json(
+        { error: planResolution.error },
+        { status: planResolution.status }
+      );
+    }
+    const planDefaults = planResolution.defaults;
+    const planDisplay = describePlan(
+      planDefaults.plan,
+      planDefaults.billingCycle,
+      planDefaults.months
+    );
 
     const partnerInfo = adminData.partner as {
       id: string;
@@ -73,27 +98,133 @@ export async function POST(request: Request) {
     const teamId = teamMember?.team_id;
     const team = teamMember?.team as unknown as { id: string; purchased_license_count: number } | null;
 
-    // Global duplicate check
+    // Global duplicate check — BASE licenses only.
+    //
+    // Add-on rows (grant_kind = 'addon') are time-boxed tier upgrades sitting
+    // on top of a licensee's existing license, and they live in this same
+    // table. An unscoped check would refuse to issue a base license to anyone
+    // who has ever held an add-on, and — read the other way — the add-on flow
+    // could never target someone who already has a license, which is every
+    // single person an add-on is for.
     const adminSupabase = createAdminClient();
     const { data: globalLicense } = await adminSupabase
       .from('licenses')
-      .select('id')
+      .select('id, plan_tier, billing_cycle, months, is_activated, team_id, admin_id')
       .eq('email', email.toLowerCase())
-      .single();
+      .eq('grant_kind', 'base')
+      .maybeSingle();
 
-    if (globalLicense) {
+    // ── Already licensed? Offer an UPGRADE instead of a dead end. ──────────
+    //
+    // This used to be a flat refusal, which meant a licensee could never be
+    // moved up a tier from here — the only path was contacting support. The
+    // Moil backend has always handled the upgrade itself (it compares tier
+    // rank and re-enrolls, or answers `blocked_downgrade`); nothing in this
+    // app ever asked it to.
+    //
+    // An upgrade is not applied silently: it costs money and changes someone's
+    // plan, so the first call returns a typed 409 describing the change and the
+    // caller has to come back with `upgrade: true`.
+    // ── UPGRADES ARE MOIL-ONLY. ────────────────────────────────────────────
+    //
+    // Partners issue Starter Annual and nothing else (see
+    // lib/licenseIssuePolicy.ts); changing what an existing licensee is on is
+    // not a partner capability at all, so they get the same flat refusal they
+    // always did.
+    //
+    // The security half matters too: the lookup above is GLOBAL by design —
+    // that is what makes the duplicate check global — so it can return a
+    // license belonging to a DIFFERENT partner, and the row is updated through
+    // the service-role client, which bypasses RLS. Gating on Moil staff closes
+    // both at once. It also stops the 409 disclosing another tenant's plan.
+    const callerMayUpgrade = isMoilAdmin(adminData);
+
+    if (globalLicense && !callerMayUpgrade) {
+      // The original generic refusal, deliberately naming no plan.
       return NextResponse.json(
-        { error: 'This email already has a license allocated. If this is a mistake, please contact cs@moilapp.com' },
-        { status: 400 }
+        {
+          error:
+            'This email already has a license allocated. If this is a mistake, please contact cs@moilapp.com',
+          code: 'LICENSE_EXISTS',
+          upgradable: false,
+        },
+        { status: 409 }
       );
     }
 
-    // Team capacity check
-    if (teamId && team) {
+    const isUpgrade = !!globalLicense && callerMayUpgrade && upgrade === true;
+
+    if (globalLicense) {
+      const currentRank = planRank(globalLicense.plan_tier, globalLicense.billing_cycle);
+      const requestedRank = planRank(planDefaults.plan, planDefaults.billingCycle);
+      const currentDisplay = globalLicense.plan_tier
+        ? describePlan(
+            globalLicense.plan_tier as LicensePlan,
+            (globalLicense.billing_cycle as BillingCycle) || 'yearly',
+            globalLicense.months ?? undefined
+          )
+        : 'an existing license';
+
+      // Same tier or lower. Refused rather than attempted: the Moil backend
+      // blocks downgrades through this path anyway, so "applying" it would
+      // report success and change nothing.
+      if (requestedRank <= currentRank) {
+        return NextResponse.json(
+          {
+            error:
+              requestedRank === currentRank
+                ? `This email already has ${currentDisplay}.`
+                : `This email already has ${currentDisplay}, which is higher than ${planDisplay}. Downgrades are not supported here.`,
+            code: 'LICENSE_EXISTS',
+            upgradable: false,
+            currentPlan: {
+              planTier: globalLicense.plan_tier,
+              billingCycle: globalLicense.billing_cycle,
+              months: globalLicense.months,
+              display: currentDisplay,
+            },
+          },
+          { status: 409 }
+        );
+      }
+
+      // A real upgrade, but not yet confirmed.
+      if (!isUpgrade) {
+        return NextResponse.json(
+          {
+            error: `This email already has ${currentDisplay}. Upgrade them to ${planDisplay}?`,
+            code: 'UPGRADE_AVAILABLE',
+            upgradable: true,
+            licenseId: globalLicense.id,
+            currentPlan: {
+              planTier: globalLicense.plan_tier,
+              billingCycle: globalLicense.billing_cycle,
+              months: globalLicense.months,
+              display: currentDisplay,
+            },
+            requestedPlan: {
+              planTier: planDefaults.plan,
+              billingCycle: planDefaults.billingCycle,
+              months: planDefaults.months ?? null,
+              display: planDisplay,
+            },
+          },
+          { status: 409 }
+        );
+      }
+    }
+
+    // Team capacity check — add-ons do not consume a seat.
+    // An add-on upgrades someone who already holds a license, so counting it
+    // would charge a partner twice for the same person.
+    // Skipped on an upgrade: the licensee already occupies their seat, and
+    // charging a second one for moving them up a tier would be wrong.
+    if (!isUpgrade && teamId && team) {
       const { count: assignedCount } = await supabase
         .from('licenses')
         .select('*', { count: 'exact', head: true })
-        .eq('team_id', teamId);
+        .eq('team_id', teamId)
+        .eq('grant_kind', 'base');
 
       const available = (team.purchased_license_count || 0) - (assignedCount || 0);
       if (available <= 0) {
@@ -104,27 +235,52 @@ export async function POST(request: Request) {
       }
     }
 
-    // Create the license row first so we can pass its ID to the Moil backend.
-    const { data: license, error: licenseError } = await supabase
-      .from('licenses')
-      .insert({
-        admin_id: user.id,
-        email: email.toLowerCase(),
-        business_name: '',
-        business_type: '',
-        is_activated: false,
-        team_id: teamId || null,
-        performed_by: user.id,
-        plan_tier: PARTNER_PLAN_DEFAULTS.plan,
-        billing_cycle: PARTNER_PLAN_DEFAULTS.billingCycle,
-        months: null,
-      })
-      .select()
-      .single();
+    // An upgrade REUSES the existing row. Inserting a second one would double
+    // every count in the dashboard and leave two rows disagreeing about which
+    // plan the licensee is on.
+    const planColumns = {
+      plan_tier: planDefaults.plan,
+      billing_cycle: planDefaults.billingCycle,
+      months: planDefaults.months ?? null,
+    };
 
-    if (licenseError) {
-      console.error('License creation error:', licenseError);
-      return NextResponse.json({ error: 'Failed to create license' }, { status: 500 });
+    let license: { id: string; email: string; created_at: string };
+
+    if (isUpgrade && globalLicense) {
+      const { data: updated, error: updateError } = await adminSupabase
+        .from('licenses')
+        .update({ ...planColumns, performed_by: user.id })
+        .eq('id', globalLicense.id)
+        .select()
+        .single();
+
+      if (updateError || !updated) {
+        console.error('License upgrade error:', updateError);
+        return NextResponse.json({ error: 'Failed to upgrade license' }, { status: 500 });
+      }
+      license = updated;
+    } else {
+      const { data: created, error: licenseError } = await supabase
+        .from('licenses')
+        .insert({
+          admin_id: user.id,
+          email: email.toLowerCase(),
+          business_name: '',
+          business_type: '',
+          is_activated: false,
+          team_id: teamId || null,
+          performed_by: user.id,
+          grant_kind: 'base',
+          ...planColumns,
+        })
+        .select()
+        .single();
+
+      if (licenseError || !created) {
+        console.error('License creation error:', licenseError);
+        return NextResponse.json({ error: 'Failed to create license' }, { status: 500 });
+      }
+      license = created;
     }
 
     // Call the Moil backend to grant / upgrade the standard_yearly plan.
@@ -152,7 +308,7 @@ export async function POST(request: Request) {
             },
             body: JSON.stringify({
               emails: [{ email: email.toLowerCase(), licenseId: license.id }],
-              defaults: PARTNER_PLAN_DEFAULTS,
+              defaults: planDefaults,
               source: partnerInfo?.name || 'moil',
               requestedBy: user.id,
             }),
@@ -207,7 +363,7 @@ export async function POST(request: Request) {
         email: license.email,
         loginUrl,
         partnerName,
-        planName: PARTNER_PLAN_DISPLAY,
+        planName: planDisplay,
         edc: edcInfo,
       });
       emailStatus = r.success ? 'sent' : 'failed';
@@ -258,24 +414,39 @@ export async function POST(request: Request) {
       await supabase.rpc('log_activity', {
         p_team_id: teamMember.team_id,
         p_admin_id: user.id,
-        p_activity_type: 'license_added',
-        p_description: `Added license for ${email.toLowerCase()}`,
-        p_metadata: { license_id: license.id, email: email.toLowerCase() },
+        p_activity_type: isUpgrade ? 'license_upgraded' : 'license_added',
+        p_description: isUpgrade
+          ? `Upgraded ${email.toLowerCase()} to ${planDisplay}`
+          : `Added ${planDisplay} license for ${email.toLowerCase()}`,
+        p_metadata: {
+          license_id: license.id,
+          email: email.toLowerCase(),
+          plan_tier: planDefaults.plan,
+          billing_cycle: planDefaults.billingCycle,
+          ...(isUpgrade ? { upgraded: true } : {}),
+        },
       });
     }
 
     return NextResponse.json(
       {
-        message: 'License added successfully',
+        message: isUpgrade
+          ? `Upgraded to ${planDisplay}`
+          : 'License added successfully',
+        upgraded: isUpgrade,
         license: {
           id: license.id,
           email: license.email,
           isActivated: status === 'activated' || status === 'already_assigned' || status === 'blocked_downgrade',
           moilStatus: status || 'pending',
+          planTier: planDefaults.plan,
+          billingCycle: planDefaults.billingCycle,
+          planDisplay,
           createdAt: license.created_at,
         },
       },
-      { status: 201 }
+      // An upgrade mutates an existing row, so 200 rather than 201.
+      { status: isUpgrade ? 200 : 201 }
     );
   } catch (error) {
     console.error('Add license error:', error);

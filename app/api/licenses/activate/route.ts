@@ -105,7 +105,14 @@ export async function POST(request: Request) {
 
     // Increment the admin's active_purchased_license_count.
     // Best effort — a failure here must not fail the activation.
-    if (existingLicense.admin_id) {
+    //
+    // Skipped for add-ons: an add-on is a time-boxed tier upgrade on top of a
+    // licensee's existing license, not a new licensee. Counting it would show
+    // a partner two active licenses for one person and burn a seat they paid
+    // for. `grant_kind` may be absent on a row written before the add-on
+    // migration, so the check is "not an addon" rather than "is base".
+    const isAddon = existingLicense.grant_kind === 'addon';
+    if (existingLicense.admin_id && !isAddon) {
       try {
         const { data: adminRow, error: adminFetchError } = await supabase
           .from('admins')
