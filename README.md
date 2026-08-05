@@ -210,8 +210,14 @@ buda-hive-license-management/
 - `POST /api/licenses/add` - Add new license for a user
 - `GET /api/licenses/list` - List all licenses (scoped to partner)
 - `POST /api/licenses/activate` - Activate license and send branded email
-- `POST /api/licenses/resend` - Resend activation email
-- `DELETE /api/licenses/remove` - Remove a license
+- `POST /api/licenses/resend` - Resend activation email (pending licenses only)
+- `PATCH /api/licenses/update-email` - Change the email on a pending license
+- `DELETE /api/licenses/delete` - Delete a pending license
+- `DELETE /api/licenses/remove` - Deprecated alias for `/api/licenses/delete`
+
+All four are scoped the same way: Moil admins reach every license, team members
+reach their team's licenses, and solo admins reach only their own. Activated
+licenses cannot be edited or deleted.
 
 ## Customization
 

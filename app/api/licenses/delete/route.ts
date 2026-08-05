@@ -1,19 +1,23 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import {
+  resolveLicenseActor,
+  loadManageableLicense,
+  logLicenseActivity,
+} from '@/lib/licenses/access';
 
 export async function DELETE(request: Request) {
   try {
     const supabase = await createClient();
 
-    // Verify user is authenticated
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    const actorResult = await resolveLicenseActor(supabase);
+    if (!actorResult.ok) {
       return NextResponse.json(
-        { error: 'Unauthorized. Please login.' },
-        { status: 401 }
+        { error: actorResult.error },
+        { status: actorResult.status }
       );
     }
+    const { actor } = actorResult;
 
     const body = await request.json();
     const { licenseId } = body;
@@ -25,53 +29,22 @@ export async function DELETE(request: Request) {
       );
     }
 
-    // Get admin info and team membership
-    const { data: adminData, error: adminError } = await supabase
-      .from('admins')
-      .select('id, global_role, partner_id')
-      .eq('id', user.id)
-      .single();
-
-    if (adminError || !adminData) {
+    const licenseResult = await loadManageableLicense(
+      supabase,
+      actor,
+      licenseId,
+      'delete'
+    );
+    if (!licenseResult.ok) {
       return NextResponse.json(
-        { error: 'Admin not found' },
-        { status: 404 }
+        { error: licenseResult.error },
+        { status: licenseResult.status }
       );
     }
+    const { license } = licenseResult;
 
-    // Get team membership
-    const { data: teamMember } = await supabase
-      .from('team_members')
-      .select('team_id, role')
-      .eq('admin_id', user.id)
-      .single();
-
-    const teamId = teamMember?.team_id;
-
-    // Get the license to verify ownership
-    let licenseQuery = supabase
-      .from('licenses')
-      .select('*')
-      .eq('id', licenseId);
-
-    // If user is in a team, check team ownership
-    // If solo admin, check admin ownership
-    if (teamId) {
-      licenseQuery = licenseQuery.eq('team_id', teamId);
-    } else {
-      licenseQuery = licenseQuery.eq('admin_id', user.id);
-    }
-
-    const { data: license, error: licenseError } = await licenseQuery.single();
-
-    if (licenseError || !license) {
-      return NextResponse.json(
-        { error: 'License not found or you do not have permission to delete it' },
-        { status: 404 }
-      );
-    }
-
-    // Only allow deletion of non-activated licenses
+    // Only allow deletion of non-activated licenses — an activated license is
+    // backing a live account.
     if (license.is_activated) {
       return NextResponse.json(
         { error: 'Cannot delete an activated license. Only pending licenses can be deleted.' },
@@ -79,10 +52,9 @@ export async function DELETE(request: Request) {
       );
     }
 
-    // Delete the license
-    const { error: deleteError } = await supabase
+    const { error: deleteError, count } = await supabase
       .from('licenses')
-      .delete()
+      .delete({ count: 'exact' })
       .eq('id', licenseId);
 
     if (deleteError) {
@@ -93,16 +65,21 @@ export async function DELETE(request: Request) {
       );
     }
 
-    // Log activity
-    if (teamId) {
-      await supabase.rpc('log_activity', {
-        p_team_id: teamId,
-        p_admin_id: user.id,
-        p_activity_type: 'license_deleted',
-        p_description: `Deleted license for ${license.email}`,
-        p_metadata: { license_id: licenseId, email: license.email }
-      });
+    // A delete blocked by RLS reports success with zero rows removed. Surface
+    // that instead of telling the user the license is gone when it isn't.
+    if (count === 0) {
+      return NextResponse.json(
+        { error: 'You do not have permission to delete this license' },
+        { status: 403 }
+      );
     }
+
+    await logLicenseActivity(supabase, actor, {
+      license,
+      activityType: 'license_deleted',
+      description: `Deleted license for ${license.email}`,
+      metadata: { license_id: licenseId, email: license.email },
+    });
 
     return NextResponse.json({
       success: true,

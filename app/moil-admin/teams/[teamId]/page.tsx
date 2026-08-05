@@ -1,12 +1,13 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useToast } from '@/components/ui/toast/use-toast';
 import Logo from '@/components/ui/Logo';
+import { LicenseRowActions } from '@/components/Dashboard/LicenseRowActions';
 import { useAuthStore, useTeamStore } from '@/lib/stores';
 import { 
   ArrowLeft,
@@ -170,6 +171,13 @@ export default function TeamViewPage() {
   const [licensesToAdd, setLicensesToAdd] = React.useState(0);
   const [updatingLicenseCount, setUpdatingLicenseCount] = React.useState(false);
 
+  // Drop the cached detail and refetch — used after any license mutation so the
+  // table reflects the change instead of the 5-minute-old cache.
+  const refreshTeamDetail = useCallback(async () => {
+    invalidateTeam(teamId);
+    await fetchTeamDetail(teamId);
+  }, [teamId, invalidateTeam, fetchTeamDetail]);
+
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
     toast({
@@ -220,8 +228,7 @@ export default function TeamViewPage() {
       setShowEditLicenseModal(false);
       setLicensesToAdd(0);
       // Refresh team data
-      invalidateTeam(teamId);
-      fetchTeamDetail(teamId);
+      await refreshTeamDetail();
     } catch (error) {
       console.error('Error updating license count:', error);
       toast({
@@ -503,7 +510,10 @@ export default function TeamViewPage() {
               <Key className="w-5 h-5" />
               Licenses
             </CardTitle>
-            <CardDescription>{licenses.length} license{licenses.length !== 1 ? 's' : ''} assigned</CardDescription>
+            <CardDescription>
+              {licenses.length} license{licenses.length !== 1 ? 's' : ''} assigned
+              {stats.pendingLicenses > 0 && ` • ${stats.pendingLicenses} pending`}
+            </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto">
@@ -514,6 +524,7 @@ export default function TeamViewPage() {
                     <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Business</th>
                     <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Status</th>
                     <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Created</th>
+                    <th className="text-right py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -546,6 +557,12 @@ export default function TeamViewPage() {
                       </td>
                       <td className="py-3 px-4 text-[var(--text-tertiary)] text-sm">
                         {new Date(license.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="py-3 px-4">
+                        <LicenseRowActions
+                          license={license}
+                          onChanged={refreshTeamDetail}
+                        />
                       </td>
                     </tr>
                   ))}

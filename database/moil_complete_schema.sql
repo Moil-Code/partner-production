@@ -345,6 +345,26 @@ SECURITY DEFINER
 STABLE
 SET search_path = public, pg_temp;
 
+-- Function to check if user is Moil staff.
+-- Mirrors the app-side rule (lib/stores/authStore.ts and the license API
+-- routes): the moil_admin role, or any @moilapp.com account.
+CREATE OR REPLACE FUNCTION public.is_moil_staff(user_id UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN EXISTS (
+    SELECT 1 FROM public.admins
+    WHERE id = user_id
+      AND (
+        global_role = 'moil_admin'
+        OR lower(email) LIKE '%@moilapp.com'
+      )
+  );
+END;
+$$ LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = public, pg_temp;
+
 -- Function to check if user is Moil admin
 CREATE OR REPLACE FUNCTION public.is_moil_admin(user_id UUID)
 RETURNS BOOLEAN AS $$
@@ -433,6 +453,7 @@ ALTER FUNCTION public.get_user_global_role(UUID) OWNER TO postgres;
 ALTER FUNCTION public.get_user_partner_id(UUID) OWNER TO postgres;
 ALTER FUNCTION public.get_user_team_ids(UUID) OWNER TO postgres;
 ALTER FUNCTION public.get_user_admin_team_ids(UUID) OWNER TO postgres;
+ALTER FUNCTION public.is_moil_staff(UUID) OWNER TO postgres;
 ALTER FUNCTION public.is_moil_admin(UUID) OWNER TO postgres;
 ALTER FUNCTION public.is_team_admin(UUID, UUID) OWNER TO postgres;
 ALTER FUNCTION public.get_partner_by_email(TEXT) OWNER TO postgres;
@@ -446,6 +467,7 @@ GRANT EXECUTE ON FUNCTION public.get_user_global_role(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_user_partner_id(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_user_team_ids(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_user_admin_team_ids(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.is_moil_staff(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_moil_admin(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.is_team_admin(UUID, UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_partner_by_email(TEXT) TO authenticated;
@@ -746,7 +768,7 @@ CREATE POLICY "licenses_select" ON public.licenses
     OR
     team_id IN (SELECT public.get_user_team_ids(auth.uid()))
     OR
-    public.get_user_global_role(auth.uid()) = 'moil_admin'
+    public.is_moil_staff(auth.uid())
   );
 
 CREATE POLICY "licenses_insert" ON public.licenses
@@ -756,7 +778,7 @@ CREATE POLICY "licenses_insert" ON public.licenses
     OR
     team_id IN (SELECT public.get_user_team_ids(auth.uid()))
     OR
-    public.get_user_global_role(auth.uid()) = 'moil_admin'
+    public.is_moil_staff(auth.uid())
   );
 
 CREATE POLICY "licenses_update" ON public.licenses
@@ -766,17 +788,26 @@ CREATE POLICY "licenses_update" ON public.licenses
     OR
     team_id IN (SELECT public.get_user_team_ids(auth.uid()))
     OR
-    public.get_user_global_role(auth.uid()) = 'moil_admin'
+    public.is_moil_staff(auth.uid())
+  )
+  WITH CHECK (
+    admin_id = auth.uid()
+    OR
+    team_id IN (SELECT public.get_user_team_ids(auth.uid()))
+    OR
+    public.is_moil_staff(auth.uid())
   );
 
+-- Any team member may delete their team's licenses. The "pending only" rule
+-- lives in /api/licenses/delete.
 CREATE POLICY "licenses_delete" ON public.licenses
   FOR DELETE TO authenticated
   USING (
     admin_id = auth.uid()
     OR
-    team_id IN (SELECT public.get_user_admin_team_ids(auth.uid()))
+    team_id IN (SELECT public.get_user_team_ids(auth.uid()))
     OR
-    public.get_user_global_role(auth.uid()) = 'moil_admin'
+    public.is_moil_staff(auth.uid())
   );
 
 CREATE POLICY "licenses_service" ON public.licenses
