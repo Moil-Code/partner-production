@@ -8,55 +8,17 @@ import {
 } from '@/lib/email';
 import {
   parsePlanKey,
-  parseLicensePlanDefaults,
   describePlan,
   planRank,
   type LicensePlan,
   type BillingCycle,
 } from '@/lib/licensePlanDefaults';
-
-// What a partner admin's own dashboard issues. It sends no plan, so this is
-// the default rather than the only option — the Moil admin dashboard has a
-// plan picker and sends its selection.
-const PARTNER_PLAN_DEFAULTS: { plan: LicensePlan; billingCycle: BillingCycle; months?: number } = {
-  plan: 'standard',
-  billingCycle: 'yearly',
-};
+import { resolveIssuablePlan } from '@/lib/licenseIssuePolicy';
 
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const { email, upgrade } = body;
-
-    // The plan the caller asked for.
-    //
-    // This route previously destructured `email` alone and hardcoded
-    // standard/yearly. The Moil admin dashboard has had a REQUIRED plan picker
-    // sending plan/billingCycle/months the whole time, so every license it
-    // created came out as Starter Annual no matter what was selected — no
-    // error, and the row and the email both agreed on the wrong plan.
-    const planRequested =
-      body.plan !== undefined ||
-      body.billingCycle !== undefined ||
-      body.months !== undefined;
-
-    const planParse = planRequested
-      ? parseLicensePlanDefaults({
-          plan: body.plan,
-          billingCycle: body.billingCycle,
-          months: body.months,
-        })
-      : ({ ok: true, defaults: { ...PARTNER_PLAN_DEFAULTS } } as const);
-
-    if (!planParse.ok) {
-      return NextResponse.json({ error: planParse.error }, { status: 400 });
-    }
-    const planDefaults = planParse.defaults;
-    const planDisplay = describePlan(
-      planDefaults.plan,
-      planDefaults.billingCycle,
-      planDefaults.months
-    );
 
     if (!email || !email.includes('@')) {
       return NextResponse.json(
@@ -81,6 +43,28 @@ export async function POST(request: Request) {
     if (adminError || !adminData) {
       return NextResponse.json({ error: 'Access denied. Admin account required.' }, { status: 403 });
     }
+
+    // Which plan this caller is allowed to issue. Partners issue Starter
+    // Annual and only that; Moil staff pick. Enforced server-side because the
+    // partner dashboard simply not rendering a picker is not a control — see
+    // lib/licenseIssuePolicy.ts.
+    const planResolution = resolveIssuablePlan(adminData, {
+      plan: body.plan,
+      billingCycle: body.billingCycle,
+      months: body.months,
+    });
+    if (!planResolution.ok) {
+      return NextResponse.json(
+        { error: planResolution.error },
+        { status: planResolution.status }
+      );
+    }
+    const planDefaults = planResolution.defaults;
+    const planDisplay = describePlan(
+      planDefaults.plan,
+      planDefaults.billingCycle,
+      planDefaults.months
+    );
 
     const partnerInfo = adminData.partner as {
       id: string;

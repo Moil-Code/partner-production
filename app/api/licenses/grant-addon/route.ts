@@ -7,6 +7,7 @@ import {
   describePlan,
   type LicensePlan,
 } from '@/lib/licensePlanDefaults';
+import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
 
 /**
  * Grant a time-boxed plan add-on from the Moil admin dashboard.
@@ -49,13 +50,10 @@ export async function POST(request: Request) {
       .eq('id', user.id)
       .single();
 
-    // Mirrors the check in /api/licenses (moil-admin surfaces): the role, or an
-    // @moilapp.com address, which is how this app grants Moil staff access.
-    const isMoilAdmin =
-      adminData?.global_role === 'moil_admin' ||
-      (adminData?.email || '').toLowerCase().endsWith('@moilapp.com');
-
-    if (adminError || !adminData || !isMoilAdmin) {
+    // One definition of "Moil staff", shared with the plan-issuing policy —
+    // the two must agree, or a caller who may pick any plan on /add could be
+    // refused an add-on here (or the reverse).
+    if (adminError || !adminData || !isMoilAdmin(adminData)) {
       return NextResponse.json(
         { error: 'Access denied. Moil admin access required.' },
         { status: 403 }
