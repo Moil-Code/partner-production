@@ -8,16 +8,14 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { useToast } from '@/components/ui/toast/use-toast';
 import Logo from '@/components/ui/Logo';
-import { 
+import { LicenseRowActions } from '@/components/Dashboard/LicenseRowActions';
+import {
   ArrowLeft,
   Key,
-  Plus,
   Search,
   Mail,
   CheckCircle,
   Clock,
-  Trash2,
-  RefreshCw,
   Building2
 } from 'lucide-react';
 
@@ -50,7 +48,6 @@ function LicensesContent() {
   const [partner, setPartner] = useState<Partner | null>(null);
   const [licenses, setLicenses] = useState<License[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [processingId, setProcessingId] = useState<string | null>(null);
 
   useEffect(() => {
     checkAuthAndFetchData();
@@ -131,74 +128,6 @@ function LicensesContent() {
       router.push('/login');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleResendEmail = async (license: License) => {
-    setProcessingId(license.id);
-    try {
-      const response = await fetch('/api/licenses/resend', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ licenseId: license.id })
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to resend email');
-      }
-
-      toast({
-        title: 'Success',
-        description: 'Activation email resent',
-        type: 'success',
-      });
-    } catch (error) {
-      console.error('Error resending email:', error);
-      toast({
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to resend email',
-        type: 'error',
-      });
-    } finally {
-      setProcessingId(null);
-    }
-  };
-
-  const handleDeleteLicense = async (license: License) => {
-    if (!confirm(`Are you sure you want to delete the license for ${license.email}?`)) {
-      return;
-    }
-
-    setProcessingId(license.id);
-    try {
-      const response = await fetch('/api/licenses/remove', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ licenseId: license.id })
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to delete license');
-      }
-
-      toast({
-        title: 'Success',
-        description: 'License deleted',
-        type: 'success',
-      });
-
-      await checkAuthAndFetchData();
-    } catch (error) {
-      console.error('Error deleting license:', error);
-      toast({
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to delete license',
-        type: 'error',
-      });
-    } finally {
-      setProcessingId(null);
     }
   };
 
@@ -366,29 +295,10 @@ function LicensesContent() {
                           {new Date(license.created_at).toLocaleDateString()}
                         </td>
                         <td className="py-4 px-4 text-right">
-                          <div className="flex items-center justify-end gap-2">
-                            {!license.is_activated && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleResendEmail(license)}
-                                disabled={processingId === license.id}
-                                title="Resend activation email"
-                              >
-                                <RefreshCw className={`w-4 h-4 ${processingId === license.id ? 'animate-spin' : ''}`} />
-                              </Button>
-                            )}
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => handleDeleteLicense(license)}
-                              disabled={processingId === license.id}
-                              className="text-red-600 hover:bg-red-50"
-                              title="Delete license"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </Button>
-                          </div>
+                          <LicenseRowActions
+                            license={license}
+                            onChanged={checkAuthAndFetchData}
+                          />
                         </td>
                       </tr>
                     ))}

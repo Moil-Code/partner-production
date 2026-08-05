@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { sendLicenseActivationEmail, type EdcEmailInfo } from '@/lib/email';
+import {
+  resolveLicenseActor,
+  loadManageableLicense,
+  logLicenseActivity,
+  LICENSE_ADMIN_COLUMNS,
+} from '@/lib/licenses/access';
 
 // Minimum gap between two sends for the same license. Guards against
 // accidental double-sends / mashing the resend button in the dashboard.
@@ -46,66 +52,33 @@ export async function POST(request: Request) {
 
     const supabase = await createClient();
 
-    // Get current admin user
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-
-    if (authError || !user) {
+    // Resolve the caller, pulling their own partner branding along with the
+    // admin record so it can serve as the branding fallback below.
+    const actorResult = await resolveLicenseActor(supabase, {
+      adminSelect: `${LICENSE_ADMIN_COLUMNS}, partner:partners(${PARTNER_BRANDING_COLUMNS})`,
+    });
+    if (!actorResult.ok) {
       return NextResponse.json(
-        { error: 'Unauthorized. Please login.' },
-        { status: 401 }
+        { error: actorResult.error },
+        { status: actorResult.status }
       );
     }
+    const { actor } = actorResult;
+    const adminData = actor.admin;
 
-    // Verify user is an admin and get their own partner branding
-    const { data: adminData, error: adminError } = await supabase
-      .from('admins')
-      .select(`*, partner:partners(${PARTNER_BRANDING_COLUMNS})`)
-      .eq('id', user.id)
-      .single();
-
-    if (adminError || !adminData) {
+    const licenseResult = await loadManageableLicense(
+      supabase,
+      actor,
+      licenseId,
+      'resend the email for'
+    );
+    if (!licenseResult.ok) {
       return NextResponse.json(
-        { error: 'Access denied. Admin account required.' },
-        { status: 403 }
+        { error: licenseResult.error },
+        { status: licenseResult.status }
       );
     }
-
-    const isMoilAdmin =
-      adminData.global_role === 'moil_admin' ||
-      (adminData.email as string | null)?.endsWith('@moilapp.com') === true;
-
-    // Get user's team
-    const { data: teamMember } = await supabase
-      .from('team_members')
-      .select('team_id')
-      .eq('admin_id', user.id)
-      .single();
-
-    const teamId = teamMember?.team_id;
-
-    let licenseQuery = supabase
-      .from('licenses')
-      .select('*')
-      .eq('id', licenseId);
-
-    if (isMoilAdmin) {
-      // Moil admins can resend for any license (RLS grants cross-partner read).
-    } else if (teamId) {
-      // If user is in a team, they can resend for any team license
-      licenseQuery = licenseQuery.eq('team_id', teamId);
-    } else {
-      // Solo admin can only resend for their own licenses
-      licenseQuery = licenseQuery.eq('admin_id', user.id);
-    }
-
-    const { data: license, error: licenseError } = await licenseQuery.single();
-
-    if (licenseError || !license) {
-      return NextResponse.json(
-        { error: 'License not found or you do not have permission to resend' },
-        { status: 404 }
-      );
-    }
+    const { license } = licenseResult;
 
     if (license.is_activated) {
       return NextResponse.json(
@@ -139,7 +112,7 @@ export async function POST(request: Request) {
         .eq('id', license.partner_id)
         .single();
       if (licensePartner) partnerInfo = licensePartner as PartnerBranding;
-    } else if (!license.partner_id && license.admin_id && license.admin_id !== user.id) {
+    } else if (!license.partner_id && license.admin_id && license.admin_id !== actor.userId) {
       const { data: ownerAdmin } = await supabase
         .from('admins')
         .select(`partner:partners(${PARTNER_BRANDING_COLUMNS})`)
@@ -170,16 +143,28 @@ export async function POST(request: Request) {
 
     // Update message_id and email_status based on result
     if (emailResult.success && emailResult.messageId) {
-      await supabase
+      const { count } = await supabase
         .from('licenses')
-        .update({
-          message_id: emailResult.messageId,
-          email_status: 'sent',
-          activation_email_sent_at: sentAt,
-          last_reminder_sent_at: null,
-          reminder_count: 0,
-        })
+        .update(
+          {
+            message_id: emailResult.messageId,
+            email_status: 'sent',
+            activation_email_sent_at: sentAt,
+            last_reminder_sent_at: null,
+            reminder_count: 0,
+          },
+          { count: 'exact' }
+        )
         .eq('id', license.id);
+
+      // The email is already out, so this isn't worth failing the request over
+      // — but a zero-row update means RLS rejected the write and the cooldown
+      // wasn't recorded, which is worth seeing in the logs.
+      if (count === 0) {
+        console.warn(
+          `Resent activation email for license ${license.id} but could not record the send (update blocked).`
+        );
+      }
     } else {
       console.error('Failed to resend activation email:', emailResult.error);
       await supabase
@@ -194,16 +179,12 @@ export async function POST(request: Request) {
       );
     }
 
-    // Log activity
-    if (teamMember?.team_id) {
-      await supabase.rpc('log_activity', {
-        p_team_id: teamMember.team_id,
-        p_admin_id: user.id,
-        p_activity_type: 'license_resend',
-        p_description: `Resent activation email to ${license.email}`,
-        p_metadata: { license_id: license.id, email: license.email }
-      });
-    }
+    await logLicenseActivity(supabase, actor, {
+      license,
+      activityType: 'license_resend',
+      description: `Resent activation email to ${license.email}`,
+      metadata: { license_id: license.id, email: license.email },
+    });
 
     return NextResponse.json(
       {

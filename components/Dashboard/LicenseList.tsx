@@ -239,6 +239,9 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
         description: "Invitation email resent successfully!",
         type: "success"
       });
+
+      // Pick up the refreshed email status / sent-at on the row.
+      onRefresh();
     } catch (err: any) {
       toast({
         title: "Error",
