@@ -12,7 +12,8 @@ This document describes the public API endpoints that can be called by external 
 2. [Activate License](#2-activate-license)
 3. [Purchase Licenses](#3-purchase-licenses)
 4. [Record Plan Add-on](#4-record-plan-add-on)
-5. [License Plan Metadata Columns](#license-plan-metadata-columns)
+5. [List License Assignments](#5-list-license-assignments)
+6. [License Plan Metadata Columns](#license-plan-metadata-columns)
 
 ---
 
@@ -428,6 +429,113 @@ from being issued their own license.
 
 ---
 
+## 5. List License Assignments
+
+Read-only feed of license assignments, consumed by the Moil backend's seat
+roster so it can report when a seat was **assigned** rather than when it was
+activated.
+
+### Why it exists
+
+A partner admin assigns a license to an email here; the licensee activates it in
+Moil days, weeks or months later. Moil's own database only ever witnesses the
+activation, so without this endpoint every "assigned" date Moil reports is
+really an activation date — and a seat nobody has activated yet has no date at
+all. `licenses.created_at` is the assignment moment (rows are inserted with
+`is_activated: false` the instant an admin adds the address).
+
+### Endpoint
+
+```
+GET /api/licenses/assignments
+```
+
+### Authentication
+
+**Required** — `x-internal-api-key` (or `x-api-key`) matching `MOIL_INTERNAL_API_KEY`,
+the same shared secret as `/api/licenses/addon`.
+
+Unlike `/verify`, `/activate` and `/backfill` — which are matched by license
+UUID, so the id is the capability — this endpoint **enumerates**, returning
+email addresses and business names. It **fails closed**: when
+`MOIL_INTERNAL_API_KEY` is unset it returns `503` and serves nothing.
+
+### Query Parameters
+
+| Parameter         | Type    | Required | Description |
+|-------------------|---------|----------|-------------|
+| `limit`           | integer | No       | Page size, 1-1000 (default 500) |
+| `updatedSince`    | string  | No       | ISO 8601. Returns rows with `updated_at >= this`, for incremental sync. An unparseable value is **rejected**, never ignored |
+| `cursorUpdatedAt` | string  | No       | Keyset cursor — the `updated_at` of the last row consumed |
+| `cursorId`        | string  | No       | Keyset cursor — the `id` of the last row consumed. Must be sent together with `cursorUpdatedAt` |
+
+Only `grant_kind = 'base'` rows are returned. An add-on is a temporary tier
+upgrade on top of a live seat, so its `created_at` is the date of the upgrade,
+not of the assignment.
+
+### Example Request
+
+```bash
+curl -X GET "https://partners.moilapp.com/api/licenses/assignments?limit=500" \
+  -H "x-internal-api-key: $MOIL_INTERNAL_API_KEY"
+```
+
+### Success Response
+
+**Status Code:** `200 OK`
+
+```json
+{
+  "success": true,
+  "generatedAt": "2026-08-11T12:00:00.000Z",
+  "count": 500,
+  "hasMore": true,
+  "nextCursor": { "updatedAt": "2026-08-01T09:14:22.000Z", "id": "550e8400-..." },
+  "assignments": [
+    {
+      "licenseId": "550e8400-e29b-41d4-a716-446655440000",
+      "email": "founder@example.com",
+      "moilUserId": "6512a...",
+      "businessName": "Acme Bakery",
+      "businessType": "Food & Beverage",
+      "assignedAt": "2026-03-02T15:04:00.000Z",
+      "activatedAt": "2026-07-19T11:20:00.000Z",
+      "isActivated": true,
+      "planTier": "standard",
+      "billingCycle": "yearly",
+      "months": 12,
+      "expiresAt": "2027-03-02T15:04:00.000Z",
+      "partnerId": "…",
+      "partnerName": "EDC Hive",
+      "teamId": "…",
+      "updatedAt": "2026-07-19T11:20:00.000Z"
+    }
+  ]
+}
+```
+
+`assignedAt` is the field this endpoint exists for. `activatedAt` is returned
+alongside it so a caller can see the gap it has been reporting as the assignment
+date, and reconcile rather than guess.
+
+### Pagination
+
+Keyset, not offset. Rows are inserted while a long sync walks the table, and an
+offset would silently skip rows as earlier pages shift underneath it. Pass the
+returned `nextCursor` back as `cursorUpdatedAt` / `cursorId` until `hasMore` is
+`false`, and advance your watermark from `nextCursor` rather than from your own
+clock.
+
+### Error Responses
+
+| Status | Meaning |
+|--------|---------|
+| `400`  | `updatedSince` is not a valid timestamp, or only one half of the cursor was sent |
+| `401`  | Missing or wrong API key |
+| `503`  | `MOIL_INTERNAL_API_KEY` is not configured on the server |
+
+---
+
 ## Typical Flow
 
 1. **Admin purchases licenses** → Payment provider calls `/api/licenses/purchase` to add licenses to the admin's team
@@ -436,6 +544,7 @@ from being issued their own license.
 4. **Mobile app verifies license** → App calls `/api/licenses/verify?licenseId=xxx&orgSlug=xxx` to check validity
 5. **User activates license** → App calls `/api/licenses/activate` with business info (plus optional plan metadata) to activate
 6. **Moil grants a temporary upgrade** (optional) → Moil backend calls `/api/licenses/addon` so the add-on is visible here; it expires on its own date and the licensee returns to their base license
+7. **Moil syncs assignment dates** → Moil backend polls `/api/licenses/assignments` and mirrors each `assignedAt` onto its own records, so its seat roster reports the date the seat was handed out rather than the date it was activated
 
 ---
 
