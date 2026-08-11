@@ -105,3 +105,35 @@ Anywhere you need to build an absolute URL (email links, OG tags, activation URL
 - Toast feedback via `useToast()` from `components/ui/toast/use-toast`. Theme via the wrapper in `components/ui/theme-provider.tsx` (persists to `localStorage` key `moil-theme`, with an inline anti-flash script in `app/layout.tsx`).
 - The DB `admins` table's primary key **is** `auth.users.id` — the same UUID. Don't generate separate IDs.
 - `EXTERNAL_API_DOCS.md` and `NEW_FEATURES.md` document the public license API and CSV import/export respectively; keep them in sync if you change those endpoints.
+
+## The assignment date is ours, and only ours (2026-08)
+
+`licenses.created_at` is the moment a partner admin hands a seat out. The Moil
+backend never witnesses that event — it first hears about a seat when the
+licensee ACTIVATES, which can be months later and never happens at all for a
+seat that is still unclaimed. So every "assigned" date Moil could report was
+really an activation date.
+
+`GET /api/licenses/assignments` (documented in `EXTERNAL_API_DOCS.md`) is the
+feed that fixes it. Three things about it are load-bearing:
+
+- **`grant_kind = 'base'` only.** An add-on row is a temporary tier upgrade on
+  top of a live seat, so its `created_at` is the date of the upgrade. Emitting
+  it here would silently redate the seat to an unrelated event — wrong in a way
+  that looks perfectly plausible downstream.
+- **Shared-secret auth, failing closed.** `/verify`, `/activate` and `/backfill`
+  are matched by license UUID, so the id itself is the capability. This route
+  ENUMERATES emails and business names, so a UUID is no barrier; it uses
+  `MOIL_INTERNAL_API_KEY` like `/addon` and returns 503 when that is unset.
+- **Keyset pagination on `(updated_at, id)`, never offset.** Rows are inserted
+  while a sync walks the table, and an offset would silently skip rows as the
+  earlier pages shift — a partner mysteriously missing a handful of seats, with
+  nothing erroring.
+
+It is in the `middleware.ts` allowlist. Without that it would redirect to
+`/login` and the caller would receive an HTML page with a 200 — a failure that
+reads as success to anything not checking the content type.
+
+Note the select string is ONE literal, deliberately not `+`-concatenated:
+supabase-js parses it at the type level, and a concatenated string widens to
+`string`, which makes it infer an error type for every row.

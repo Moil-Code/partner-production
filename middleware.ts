@@ -46,6 +46,11 @@ export async function middleware(request: NextRequest) {
     // rather than mutating one the caller already holds an id for.
     request.nextUrl.pathname.startsWith('/api/licenses/addon') ||
     request.nextUrl.pathname.startsWith('/api/licenses/backfill') ||
+    // Read-only assignment feed for the Moil backend's seat roster. It carries
+    // no session, so without this it would redirect to /login and the caller
+    // would receive an HTML page with a 200 — a failure that looks like
+    // success to anything not inspecting the content type.
+    request.nextUrl.pathname.startsWith('/api/licenses/assignments') ||
     request.nextUrl.pathname.startsWith('/api/licenses/purchase') ||
     request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||
     request.nextUrl.pathname.startsWith('/api/signup/') ||
