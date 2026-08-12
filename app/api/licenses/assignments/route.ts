@@ -75,8 +75,18 @@ export async function GET(request: NextRequest) {
       console.error(
         '[licenses/assignments] MOIL_INTERNAL_API_KEY not configured — refusing all requests.'
       );
+      // Naming the variable is deliberate. The caller cannot read this
+      // server's logs, so "not configured" alone sends whoever is wiring the
+      // sync looking for the wrong thing — the name is already public in
+      // EXTERNAL_API_DOCS.md and CLAUDE.md, and only the VALUE is a secret.
       return NextResponse.json(
-        { error: 'Assignments endpoint is not configured on this server.' },
+        {
+          error: 'Assignments endpoint is not configured on this server.',
+          detail:
+            'MOIL_INTERNAL_API_KEY is not set. Set it in this deployment\'s ' +
+            'environment (the same value the Moil backend sends) and redeploy — ' +
+            'on Vercel, environment variables are only picked up by a new build.',
+        },
         { status: 503 }
       );
     }
