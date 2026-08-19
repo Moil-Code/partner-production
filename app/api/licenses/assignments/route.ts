@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import { NextRequest } from 'next/server';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import {
+  internalApiKey,
+  providedApiKey,
+  notConfiguredBody,
+} from '@/lib/internalApiKey';
 
 /**
  * Read-only feed of license ASSIGNMENTS, for the Moil backend's seat roster.
@@ -76,30 +81,21 @@ type LicenseAssignmentRow = {
 
 export async function GET(request: NextRequest) {
   try {
-    const expectedKey = process.env.MOIL_INTERNAL_API_KEY;
+    // Accepts INTERNAL_API_KEY or MOIL_INTERNAL_API_KEY — see lib/internalApiKey.
+    const expectedKey = internalApiKey();
     if (!expectedKey) {
       console.error(
-        '[licenses/assignments] MOIL_INTERNAL_API_KEY not configured — refusing all requests.'
+        '[licenses/assignments] no internal API key configured — refusing all requests.'
       );
-      // Naming the variable is deliberate. The caller cannot read this
-      // server's logs, so "not configured" alone sends whoever is wiring the
-      // sync looking for the wrong thing — the name is already public in
-      // EXTERNAL_API_DOCS.md and CLAUDE.md, and only the VALUE is a secret.
-      return NextResponse.json(
-        {
-          error: 'Assignments endpoint is not configured on this server.',
-          detail:
-            'MOIL_INTERNAL_API_KEY is not set. Set it in this deployment\'s ' +
-            'environment (the same value the Moil backend sends) and redeploy — ' +
-            'on Vercel, environment variables are only picked up by a new build.',
-        },
-        { status: 503 }
-      );
+      // The response names which DEPLOYMENT is missing it, not just the
+      // variable: the caller cannot read this server's logs, and only the
+      // VALUE is a secret.
+      return NextResponse.json(notConfiguredBody('Assignments endpoint'), {
+        status: 503,
+      });
     }
 
-    const providedKey =
-      request.headers.get('x-internal-api-key') || request.headers.get('x-api-key');
-    if (providedKey !== expectedKey) {
+    if (providedApiKey(request) !== expectedKey) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 

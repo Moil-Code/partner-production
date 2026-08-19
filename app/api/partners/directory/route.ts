@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import { NextRequest } from 'next/server';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import {
+  internalApiKey,
+  providedApiKey,
+  notConfiguredBody,
+} from '@/lib/internalApiKey';
 
 /**
  * Read-only directory of partners, for the Moil admin portal's license
@@ -57,28 +62,21 @@ type LicenseCountRow = {
 
 export async function GET(request: NextRequest) {
   try {
-    const expectedKey = process.env.MOIL_INTERNAL_API_KEY;
+    // Accepts INTERNAL_API_KEY or MOIL_INTERNAL_API_KEY — see lib/internalApiKey.
+    const expectedKey = internalApiKey();
     if (!expectedKey) {
       console.error(
-        '[partners/directory] MOIL_INTERNAL_API_KEY not configured — refusing all requests.'
+        '[partners/directory] no internal API key configured — refusing all requests.'
       );
-      // Naming the variable, like the assignments feed does: the caller cannot
-      // read this server's logs, and only the VALUE is a secret.
-      return NextResponse.json(
-        {
-          error: 'Partner directory endpoint is not configured on this server.',
-          detail:
-            'MOIL_INTERNAL_API_KEY is not set. Set it in this deployment\'s ' +
-            'environment (the same value the Moil backend sends) and redeploy — ' +
-            'on Vercel, environment variables are only picked up by a new build.',
-        },
-        { status: 503 }
-      );
+      // The response names which DEPLOYMENT is missing it, not just the
+      // variable: the caller cannot read this server's logs, and only the
+      // VALUE is a secret.
+      return NextResponse.json(notConfiguredBody('Partner directory endpoint'), {
+        status: 503,
+      });
     }
 
-    const providedKey =
-      request.headers.get('x-internal-api-key') || request.headers.get('x-api-key');
-    if (providedKey !== expectedKey) {
+    if (providedApiKey(request) !== expectedKey) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
