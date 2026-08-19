@@ -5,6 +5,7 @@ import {
   internalApiKey,
   providedApiKey,
   notConfiguredBody,
+  unauthorizedBody,
 } from '@/lib/internalApiKey';
 
 /**
@@ -76,8 +77,15 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    if (providedApiKey(request) !== expectedKey) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const presentedKey = providedApiKey(request);
+    if (presentedKey !== expectedKey) {
+      // Outside production the body carries both fingerprints, so a mismatch
+      // between two first-party services can be settled in one request rather
+      // than by comparing secrets across two dashboards by eye.
+      return NextResponse.json(
+        unauthorizedBody(expectedKey, presentedKey),
+        { status: 401 },
+      );
     }
 
     const params = request.nextUrl.searchParams;

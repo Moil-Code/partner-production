@@ -18,6 +18,8 @@
  * then fails for a reason invisible on both sides.
  */
 
+import { createHash } from 'crypto';
+
 export const INTERNAL_KEY_NAMES = [
   'INTERNAL_API_KEY',
   'MOIL_INTERNAL_API_KEY',
@@ -55,5 +57,48 @@ export function notConfiguredBody(routeLabel: string) {
       "environment (the partner app, not the Moil backend). Either name works, " +
       'and the value must match what the Moil backend sends — on Vercel, ' +
       'environment variables are only picked up by a new build.',
+  };
+}
+
+
+/**
+ * An 8-char digest of a value. Never the value.
+ */
+export function fingerprint(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return createHash('sha256').update(value).digest('hex').slice(0, 8);
+}
+
+/**
+ * The 401 body.
+ *
+ * OUTSIDE PRODUCTION it carries the fingerprint of the key we expect and of the
+ * one we received. That is the entire question a 401 poses between two
+ * first-party services — "are these the same secret?" — and neither side could
+ * previously answer it, so the operator is reduced to comparing values by eye
+ * across two dashboards, which is exactly where a trailing newline or a
+ * half-pasted key survives inspection.
+ *
+ * IN PRODUCTION it is the bare word, unchanged. The caller here is
+ * unauthenticated by definition, and handing an unauthenticated caller anything
+ * derived from a secret is a bad trade for a debugging convenience — an 8-char
+ * digest lets a guess be checked offline instead of against a rate-limited
+ * endpoint. `NODE_ENV` is 'production' for Vercel production AND preview
+ * builds, so this only ever opens up on a developer's own machine.
+ */
+export function unauthorizedBody(expected: string | null, received: string | null) {
+  if (process.env.NODE_ENV === 'production') {
+    return { error: 'Unauthorized' };
+  }
+  return {
+    error: 'Unauthorized',
+    // Named so it is obvious these are digests, not keys.
+    hint: 'Key mismatch. These are SHA-256 prefixes, not the keys themselves.',
+    expectedFingerprint: fingerprint(expected),
+    receivedFingerprint: fingerprint(received),
+    expectedFromEnv: INTERNAL_KEY_NAMES.find(
+      (n) => (process.env[n] || '').trim() !== '',
+    ) || null,
+    received: received ? 'a key was presented' : 'no key was presented',
   };
 }
