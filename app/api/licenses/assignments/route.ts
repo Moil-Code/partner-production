@@ -50,6 +50,12 @@ const SELECT_COLUMNS =
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 1000;
 
+// Validated rather than passed through: an id that is not a UUID reaches
+// PostgREST as a malformed filter, which fails the whole query with a 500 the
+// caller cannot act on. Refusing it here names the actual mistake.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 type LicenseAssignmentRow = {
   id: string;
   email: string | null;
@@ -131,6 +137,26 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Optional partner scope. The admin portal's license-activity report is
+    // always about ONE partner, and without this it would have to walk the
+    // whole table and discard almost all of it — which is not merely slow, it
+    // makes an incremental pull impossible to reason about, because the
+    // watermark it earns covers rows it never showed anyone.
+    //
+    // An UNPARSEABLE value is refused rather than ignored, exactly like
+    // `updatedSince`: silently dropping the filter would answer a
+    // partner-scoped question with every partner's seats, and the caller has no
+    // way to tell that from a partner who genuinely has that many.
+    const partnerId = params.get('partnerId');
+    if (partnerId !== null) {
+      if (!UUID_RE.test(partnerId)) {
+        return NextResponse.json(
+          { error: 'partnerId must be a UUID' },
+          { status: 400 }
+        );
+      }
+    }
+
     const supabase = createSupabaseClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SECRET_KEY!,
@@ -148,6 +174,7 @@ export async function GET(request: NextRequest) {
       // full page, which is wrong exactly when the total is a multiple of limit.
       .limit(limit + 1);
 
+    if (partnerId) query = query.eq('partner_id', partnerId);
     if (updatedSince) query = query.gte('updated_at', updatedSince);
     if (cursorUpdatedAt && cursorId) {
       // Strictly after (updated_at, id). `or` inside the tuple comparison is

@@ -56,7 +56,14 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/signup/') ||
     request.nextUrl.pathname.startsWith('/api/partners/approve') ||
     request.nextUrl.pathname.startsWith('/api/partners/grant-access') ||
-    request.nextUrl.pathname.startsWith('/api/partners/branding/')
+    request.nextUrl.pathname.startsWith('/api/partners/branding/') ||
+    // Read-only partner directory for the Moil admin portal's license activity
+    // report. Same reasoning as the assignments feed above: it carries no
+    // session, so without this entry it redirects to /login and the caller gets
+    // an HTML page with a 200 — a failure that reads as success to anything not
+    // inspecting the content type. It enforces MOIL_INTERNAL_API_KEY itself and
+    // fails closed when unset.
+    request.nextUrl.pathname.startsWith('/api/partners/directory')
   
   const isPaymentPage = request.nextUrl.pathname.startsWith('/payment')
   const isForgotPassword = request.nextUrl.pathname.startsWith('/forgot-password')

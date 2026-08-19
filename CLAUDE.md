@@ -137,3 +137,33 @@ reads as success to anything not checking the content type.
 Note the select string is ONE literal, deliberately not `+`-concatenated:
 supabase-js parses it at the type level, and a concatenated string widens to
 `string`, which makes it infer an error type for every row.
+
+## The partner directory, and why the feed grew a `partnerId` (2026-08)
+
+The Moil admin portal's license-activity report is always about ONE partner, and
+that shape drove two additions here.
+
+`GET /api/partners/directory` exists because a picker cannot be built out of
+`/api/licenses/assignments`. Doing so means pulling the entire license table and
+distinct-ing partner ids client-side — O(licenses) work for an O(partners)
+question — and it **omits every partner who has not issued a license yet**,
+which is exactly the partner an admin is most likely to be looking for. Same
+shared secret, same fail-closed 503, same allowlist requirement as the
+assignments feed.
+
+Its counts are **issued and activated, and nothing else**. Activation rate over
+a window, active users, per-user metrics all need Moil's activity data, which
+this app does not have. A count this app could compute wrongly is worse than one
+it declines to compute — and `withCounts` is OFF by default so the cheap shape
+is what a naive caller gets, since counting every partner's licenses is the
+expensive half of the call.
+
+`partnerId` on `/api/licenses/assignments` is validated as a UUID and **refused
+when malformed**, like `updatedSince`. Dropping a bad filter silently would
+answer a partner-scoped question with every partner's seats, and the caller has
+no way to distinguish that from a partner who genuinely has that many. The
+partner-scoped walk needs `database/add_partner_activity_report_indexes.sql`:
+the existing fleet-wide `(updated_at, id)` index does NOT serve a query with a
+`partner_id` equality in front of the sort, so without it every page either
+scans the whole feed and filters or re-sorts from scratch — correct data, paid
+for once per page, with nothing reporting that it happened.

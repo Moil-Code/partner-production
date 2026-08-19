@@ -13,6 +13,7 @@ This document describes the public API endpoints that can be called by external 
 3. [Purchase Licenses](#3-purchase-licenses)
 4. [Record Plan Add-on](#4-record-plan-add-on)
 5. [List License Assignments](#5-list-license-assignments)
+6. [List Partners](#6-list-partners)
 6. [License Plan Metadata Columns](#license-plan-metadata-columns)
 
 ---
@@ -468,6 +469,7 @@ email addresses and business names. It **fails closed**: when
 | `updatedSince`    | string  | No       | ISO 8601. Returns rows with `updated_at >= this`, for incremental sync. An unparseable value is **rejected**, never ignored |
 | `cursorUpdatedAt` | string  | No       | Keyset cursor — the `updated_at` of the last row consumed |
 | `cursorId`        | string  | No       | Keyset cursor — the `id` of the last row consumed. Must be sent together with `cursorUpdatedAt` |
+| `partnerId`       | string  | No       | UUID. Scopes the feed to one partner's licenses. An invalid UUID is **rejected**, never ignored — silently dropping it would answer a partner-scoped question with every partner's seats |
 
 Only `grant_kind = 'base'` rows are returned. An add-on is a temporary tier
 upgrade on top of a live seat, so its `created_at` is the date of the upgrade,
@@ -530,7 +532,92 @@ clock.
 
 | Status | Meaning |
 |--------|---------|
-| `400`  | `updatedSince` is not a valid timestamp, or only one half of the cursor was sent |
+| `400`  | `updatedSince` is not a valid timestamp, `partnerId` is not a UUID, or only one half of the cursor was sent |
+| `401`  | Missing or wrong API key |
+| `503`  | `MOIL_INTERNAL_API_KEY` is not configured on the server |
+
+---
+
+## 6. List Partners
+
+Read-only directory of partner organisations, consumed by the Moil admin
+portal's license activity report.
+
+### Why it exists
+
+The report is always about ONE partner, so a human has to pick one before
+anything can be shown. Building that picker out of `/api/licenses/assignments`
+would mean pulling the entire license table and distinct-ing the partner ids
+client-side — O(licenses) work to answer an O(partners) question, and it omits
+every partner who has not issued a license yet.
+
+### Endpoint
+
+```
+GET /api/partners/directory
+```
+
+### Authentication
+
+Shared secret, same as `/api/licenses/assignments`: send
+`x-internal-api-key` (or `x-api-key`) matching `MOIL_INTERNAL_API_KEY`. It
+**fails closed** — a `503` when the key is unset, never an open endpoint.
+
+### Query Parameters
+
+| Parameter     | Type    | Required | Description |
+|---------------|---------|----------|-------------|
+| `limit`       | integer | No       | Page size, 1-500 (default 200) |
+| `search`      | string  | No       | Case-insensitive substring match on partner name or domain |
+| `withCounts`  | boolean | No       | `true` to include `licensesIssued` / `licensesActivated` per partner. Off by default — counting every partner's licenses is the expensive half of the call, and a caller rendering only a picker does not need it |
+
+### Example Request
+
+```bash
+curl -X GET "https://partners.moilapp.com/api/partners/directory?withCounts=true" \
+  -H "x-internal-api-key: $MOIL_INTERNAL_API_KEY"
+```
+
+### Success Response
+
+```json
+{
+  "success": true,
+  "generatedAt": "2026-08-19T12:00:00.000Z",
+  "count": 2,
+  "hasMore": false,
+  "countsAvailable": true,
+  "countsTruncated": false,
+  "partners": [
+    {
+      "partnerId": "b1e4...",
+      "name": "Buda Hive",
+      "domain": "budahive.org",
+      "status": "approved",
+      "programName": "Buda Hive Business Program",
+      "logoUrl": "https://...",
+      "licenseDurationDays": 365,
+      "createdAt": "2026-01-04T09:12:00.000Z",
+      "licensesIssued": 48,
+      "licensesActivated": 31
+    }
+  ]
+}
+```
+
+Counts cover `grant_kind = 'base'` rows only, for the same reason the
+assignments feed does: an add-on is a tier upgrade on a live seat, not a seat,
+and counting them would report more licenses issued than seats exist.
+
+`licensesIssued` / `licensesActivated` are `null` when `withCounts` was not
+requested, and `countsAvailable: false` marks a count lookup that failed — a
+partner who has issued nothing and a partner we declined to count must never
+render alike.
+
+### Error Responses
+
+| Status | Meaning |
+|--------|---------|
 | `401`  | Missing or wrong API key |
 | `503`  | `MOIL_INTERNAL_API_KEY` is not configured on the server |
 
