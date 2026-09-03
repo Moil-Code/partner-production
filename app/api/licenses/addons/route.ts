@@ -45,8 +45,12 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const partnerId = searchParams.get('partnerId');
     // Default to live add-ons only — an admin opening this wants to know who
-    // currently has extra access, not the whole history.
+    // currently has extra access, not the whole history. Note this keeps
+    // SCHEDULED grants in the default view (their expiry is in the future),
+    // which is deliberate: an upgrade that has not started yet is something an
+    // admin needs to see coming, and it is labelled rather than implied.
     const includeExpired = searchParams.get('includeExpired') === 'true';
+    const email = searchParams.get('email');
 
     // Service role: add-on rows have no team/admin, so an RLS-bound read as the
     // user would return nothing. Safe here — the caller is verified Moil staff
@@ -62,6 +66,8 @@ export async function GET(request: Request) {
       .order('expires_at', { ascending: true });
 
     if (partnerId) query = query.eq('partner_id', partnerId);
+    // One licensee's add-on history — what the employer drill-down asks for.
+    if (email) query = query.eq('email', email.toLowerCase());
     if (!includeExpired) query = query.gt('expires_at', new Date().toISOString());
 
     const { data: addons, error: addonsError } = await query;
@@ -108,19 +114,46 @@ export async function GET(request: Request) {
 
     const now = Date.now();
 
+    /**
+     * scheduled | active | expired — derived, never stored.
+     *
+     * `expires_at` alone is NOT the answer, and reading it as one was a real
+     * defect here: a grant dated to open next month has a future expiry, so it
+     * rendered as ACTIVE and an admin reading this page would have told the
+     * founder their upgrade was live. Every other reader in the system (the
+     * SQL `effective_plan_type`, `planFeatures.isGrantActive`,
+     * `planEntitlement.isGrantActive`) withholds a grant until `starts_at`;
+     * this is that same rule, and the three-state answer is what lets the UI
+     * say which of the three it is instead of implying a binary.
+     */
+    const stateOf = (startsAt: string | null, expiresAt: string | null) => {
+      // A time-boxed grant with no end date is malformed, and reading it as
+      // permanent is how a two-month upgrade becomes a free plan for life.
+      if (!expiresAt) return 'expired' as const;
+      const ends = Date.parse(expiresAt);
+      if (Number.isNaN(ends) || ends <= now) return 'expired' as const;
+      if (startsAt) {
+        const begins = Date.parse(startsAt);
+        if (!Number.isNaN(begins) && begins > now) return 'scheduled' as const;
+      }
+      return 'active' as const;
+    };
+
     return NextResponse.json(
       {
         addons: rows.map((r) => {
           const base = r.parent_license_id ? baseById.get(r.parent_license_id) : null;
+          const state = stateOf(r.starts_at, r.expires_at);
           return {
             id: r.id,
             email: r.email,
             planTier: r.plan_tier,
             startsAt: r.starts_at,
             expiresAt: r.expires_at,
-            // Derived rather than stored: `expires_at` is the authority on
-            // every other surface too, so this cannot drift from it.
-            active: r.expires_at ? Date.parse(r.expires_at) > now : false,
+            state,
+            // Kept for callers that predate `state`. It now means what its
+            // name says — in force RIGHT NOW — rather than "not expired".
+            active: state === 'active',
             partnerId: r.partner_id,
             partnerName: r.partner_id ? partnerById.get(r.partner_id) || null : null,
             moilUserId: r.moil_user_id,

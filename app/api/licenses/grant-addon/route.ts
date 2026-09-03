@@ -105,6 +105,14 @@ export async function POST(request: Request) {
       moil_user_id?: string;
       message?: string;
       reason?: string;
+      // Whether the Supabase credit overlay actually landed. A grant opens the
+      // FEATURE gates from a timestamp, but the credit ceiling is a separate
+      // write — so 'failed' here means the founder walks through open doors
+      // and is refused by every action behind them, for the whole window.
+      // Reporting an unqualified success while this says 'failed' is what made
+      // that state invisible.
+      credit_sync?: 'ok' | 'failed' | 'deferred';
+      credit_sync_reason?: string;
     };
 
     let moilResult: MoilGrantResult | null = null;
@@ -207,17 +215,41 @@ export async function POST(request: Request) {
     }
 
     const display = describePlan(planTier as LicensePlan, 'monthly', monthsValue);
+    const endsOn = moilResult.expiresAt
+      ? new Date(moilResult.expiresAt).toLocaleDateString()
+      : null;
+
+    const baseMessage =
+      moilResult.status === 'extended'
+        ? `Extended their ${display} add-on.`
+        : endsOn
+        ? `${display} granted until ${endsOn}.`
+        : `${display} granted.`;
+
+    // The grant is real either way — features resolve from the timestamp — so
+    // this is never an error. But it is not an unqualified success either:
+    // until the overlay lands the founder holds their old AI allowance, and
+    // saying nothing is precisely how "granted but nothing happened" reached a
+    // founder with an admin looking at a green toast.
+    const creditsPending =
+      moilResult.credit_sync === 'failed' || moilResult.credit_sync === 'deferred';
+    const creditNote =
+      moilResult.credit_sync === 'deferred'
+        ? 'Their AI credit allowance switches over when the add-on starts.'
+        : moilResult.credit_sync === 'failed'
+        ? 'Their plan features are on now, but the AI credit allowance did not update yet — Moil retries this daily, and the Add-ons view shows which grants are still waiting.'
+        : null;
 
     return NextResponse.json(
       {
         success: true,
-        message:
-          moilResult.status === 'extended'
-            ? `Extended their ${display} add-on.`
-            : `${display} granted until ${new Date(moilResult.expiresAt!).toLocaleDateString()}.`,
+        message: creditNote ? `${baseMessage} ${creditNote}` : baseMessage,
         extended: moilResult.status === 'extended',
         expiresAt: moilResult.expiresAt,
+        startsAt: moilResult.startsAt ?? null,
         mirrored: !recorded.error,
+        creditSync: moilResult.credit_sync ?? null,
+        creditsPending,
         result: moilResult,
       },
       { status: 200 }
