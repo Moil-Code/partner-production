@@ -105,7 +105,11 @@ export default function MoilAdminDashboard() {
     id: string;
     email: string;
     planTier: string;
+    startsAt: string | null;
     expiresAt: string | null;
+    // scheduled | active | expired. `active` alone cannot express the first,
+    // and a grant dated to open next month used to render as live.
+    state?: 'scheduled' | 'active' | 'expired';
     active: boolean;
     partnerName: string | null;
     basePlan: { planTier: string | null; billingCycle: string | null } | null;
@@ -1265,7 +1269,9 @@ export default function MoilAdminDashboard() {
                   <div className="flex items-center gap-2 mb-3">
                     <Sparkles className="w-4 h-4 text-violet-700" />
                     <h3 className="font-semibold text-[var(--text-primary)]">
-                      Granted add-ons ({addons.filter((a) => a.active).length} active)
+                      Granted add-ons ({addons.filter((a) => (a.state ?? (a.active ? 'active' : 'expired')) === 'active').length} active
+                      {addons.filter((a) => a.state === 'scheduled').length > 0 &&
+                        `, ${addons.filter((a) => a.state === 'scheduled').length} scheduled`})
                     </h3>
                   </div>
                   <div className="overflow-x-auto">
@@ -1290,7 +1296,16 @@ export default function MoilAdminDashboard() {
                             </td>
                             <td className="py-2 pr-4 text-[var(--text-secondary)]">
                               {a.expiresAt ? new Date(a.expiresAt).toLocaleDateString() : '—'}
-                              {!a.active && (
+                              {/* An add-on that has not started is a different
+                                  fact from one that has ended, and both are
+                                  different from live. Older backends send no
+                                  `state`; those fall back to the boolean. */}
+                              {(a.state ?? (a.active ? 'active' : 'expired')) === 'scheduled' && (
+                                <span className="ml-1 text-xs text-amber-700">
+                                  (starts {a.startsAt ? new Date(a.startsAt).toLocaleDateString() : 'later'})
+                                </span>
+                              )}
+                              {(a.state ?? (a.active ? 'active' : 'expired')) === 'expired' && (
                                 <span className="ml-1 text-xs text-[var(--text-tertiary)]">(ended)</span>
                               )}
                             </td>

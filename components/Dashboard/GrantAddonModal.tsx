@@ -86,7 +86,15 @@ export function GrantAddonModal({
       }
 
       toast({
-        title: 'Add-on granted',
+        // A grant whose CREDIT overlay has not landed is not a plain success:
+        // the founder's feature gates are open and their AI allowance is
+        // unchanged, so every action behind those gates is refused. It is not
+        // an error either — the grant is real and the daily sweep retries it —
+        // so it is shown as a warning that says what to expect.
+        title:
+          data.creditSync === 'failed'
+            ? 'Add-on granted — credits still pending'
+            : 'Add-on granted',
         description:
           // `mirrored: false` means the grant IS live on Moil but this
           // dashboard has not recorded it. Saying so beats a clean success
@@ -94,7 +102,7 @@ export function GrantAddonModal({
           data.mirrored === false
             ? `${data.message} (This dashboard may take a moment to show it.)`
             : data.message,
-        type: 'success',
+        type: data.creditSync === 'failed' ? 'warning' : 'success',
       });
 
       onClose();
