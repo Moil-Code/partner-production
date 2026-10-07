@@ -10,6 +10,7 @@ import { useToast } from '@/components/ui/toast/use-toast';
 import Logo from '@/components/ui/Logo';
 import { LicenseRowActions } from '@/components/Dashboard/LicenseRowActions';
 import { GrantAddonModal } from '@/components/Dashboard/GrantAddonModal';
+import { ConfirmationModal } from '@/components/ui/confirmation-modal';
 import {
   ArrowLeft,
   Key,
@@ -18,7 +19,8 @@ import {
   CheckCircle,
   Clock,
   Building2,
-  Sparkles
+  Sparkles,
+  Undo2
 } from 'lucide-react';
 
 interface License {
@@ -60,6 +62,10 @@ function LicensesContent() {
   // specific person, so it is opened from their row rather than from a
   // free-floating button.
   const [addonFor, setAddonFor] = useState<string | null>(null);
+  // The add-on row an admin asked to remove. Held until they confirm: removal
+  // takes effect at once and cannot be undone by waiting.
+  const [removing, setRemoving] = useState<License | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
@@ -141,6 +147,46 @@ function LicensesContent() {
       router.push('/login');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Remove an add-on now and put the licensee back on their own license. The
+  // backend revokes the grant, resets their AI credits and clears their cached
+  // profile; the base license is never touched.
+  const handleRemoveAddon = async () => {
+    if (!removing) return;
+    setRemoveBusy(true);
+    try {
+      const response = await fetch('/api/licenses/revoke-addon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: removing.email,
+          ...(removing.plan_tier ? { planTier: removing.plan_tier } : {}),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to remove add-on');
+      }
+      toast({
+        title:
+          data.creditsRestored === false
+            ? 'Add-on removed — credits still pending'
+            : 'Add-on removed',
+        description: data.message,
+        type: data.creditsRestored === false ? 'warning' : 'success',
+      });
+      setRemoving(null);
+      await checkAuthAndFetchData();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'An error occurred',
+        type: 'error',
+      });
+    } finally {
+      setRemoveBusy(false);
     }
   };
 
@@ -331,6 +377,17 @@ function LicensesContent() {
                           {new Date(license.created_at).toLocaleDateString()}
                         </td>
                         <td className="py-4 px-4 text-right">
+                          {license.grant_kind === 'addon' && (
+                            <button
+                              type="button"
+                              onClick={() => setRemoving(license)}
+                              className="mr-2 inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50"
+                              title="End this add-on now and put them back on their own license"
+                            >
+                              <Undo2 className="h-3.5 w-3.5" />
+                              Remove add-on
+                            </button>
+                          )}
                           {license.grant_kind !== 'addon' && (
                             <button
                               type="button"
@@ -356,6 +413,21 @@ function LicensesContent() {
           </CardContent>
         </Card>
       </div>
+
+      <ConfirmationModal
+        isOpen={!!removing}
+        onClose={() => !removeBusy && setRemoving(null)}
+        onConfirm={handleRemoveAddon}
+        isLoading={removeBusy}
+        variant="warning"
+        title="Remove this add-on?"
+        description={
+          removing
+            ? `${removing.email} will lose the ${removing.plan_tier || 'add-on'} plan straight away and go back to their own license. Their license is not changed, and this cannot be undone by waiting.`
+            : ''
+        }
+        confirmText="Remove add-on"
+      />
 
       <GrantAddonModal
         isOpen={!!addonFor}
