@@ -48,6 +48,7 @@ import {
   Trash2,
   Send,
   Sparkles,
+  Undo2,
 } from 'lucide-react';
 
 interface Partner {
@@ -188,6 +189,49 @@ export default function MoilAdminDashboard() {
       fetchLicenses();
     }
   }, [isMoilAdmin, activeTab, admin?.id]);
+
+  // The add-on an admin asked to remove, held until they confirm. Removal is
+  // immediate and cannot be undone by waiting.
+  const [addonToRemove, setAddonToRemove] = React.useState<{
+    email: string;
+    planTier: string;
+  } | null>(null);
+  const [removingAddon, setRemovingAddon] = React.useState(false);
+
+  const handleRemoveAddon = async () => {
+    if (!addonToRemove) return;
+    setRemovingAddon(true);
+    try {
+      const response = await fetch('/api/licenses/revoke-addon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: addonToRemove.email,
+          planTier: addonToRemove.planTier,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to remove add-on');
+      toast({
+        title:
+          data.creditsRestored === false
+            ? 'Add-on removed — credits still pending'
+            : 'Add-on removed',
+        description: data.message,
+        type: data.creditsRestored === false ? 'warning' : 'success',
+      });
+      setAddonToRemove(null);
+      await fetchAddons();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'An error occurred',
+        type: 'error',
+      });
+    } finally {
+      setRemovingAddon(false);
+    }
+  };
 
   const fetchAddons = async () => {
     try {
@@ -1282,7 +1326,8 @@ export default function MoilAdminDashboard() {
                           <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Add-on</th>
                           <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Ends</th>
                           <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Their partner</th>
-                          <th className="text-left py-2 font-medium text-[var(--text-secondary)]">Base license</th>
+                          <th className="text-left py-2 pr-4 font-medium text-[var(--text-secondary)]">Base license</th>
+                          <th className="text-right py-2 font-medium text-[var(--text-secondary)]">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1312,10 +1357,27 @@ export default function MoilAdminDashboard() {
                             <td className="py-2 pr-4 text-[var(--text-secondary)]">
                               {a.partnerName || 'Moil'}
                             </td>
-                            <td className="py-2 text-[var(--text-secondary)]">
+                            <td className="py-2 pr-4 text-[var(--text-secondary)]">
                               {a.basePlan?.planTier
                                 ? `${a.basePlan.planTier}${a.basePlan.billingCycle ? ` · ${a.basePlan.billingCycle}` : ''}`
                                 : '—'}
+                            </td>
+                            <td className="py-2 text-right">
+                              {/* Only a live or scheduled add-on can be removed;
+                                  an ended one has nothing left to roll back. */}
+                              {(a.state ?? (a.active ? 'active' : 'expired')) !== 'expired' && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setAddonToRemove({ email: a.email, planTier: a.planTier })
+                                  }
+                                  className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50"
+                                  title="End this add-on now and put them back on their own license"
+                                >
+                                  <Undo2 className="h-3.5 w-3.5" />
+                                  Remove add-on
+                                </button>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -1640,6 +1702,21 @@ export default function MoilAdminDashboard() {
         confirmText="Upgrade"
         variant="warning"
         isLoading={addingLicense}
+      />
+
+      <ConfirmationModal
+        isOpen={!!addonToRemove}
+        onClose={() => !removingAddon && setAddonToRemove(null)}
+        onConfirm={handleRemoveAddon}
+        isLoading={removingAddon}
+        variant="warning"
+        title="Remove this add-on?"
+        description={
+          addonToRemove
+            ? `${addonToRemove.email} will lose the ${addonToRemove.planTier} plan straight away and go back to their own license. Their license is not changed, and this cannot be undone by waiting.`
+            : ''
+        }
+        confirmText="Remove add-on"
       />
 
       {/* Confirmation Modal */}
