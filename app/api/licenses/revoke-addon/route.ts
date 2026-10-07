@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { recordAddonLicense } from '@/lib/addonLicense';
 import { LICENSE_PLANS, type LicensePlan } from '@/lib/licensePlanDefaults';
-import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
+import { resolveLicenseActor } from '@/lib/licenses/access';
 
 /**
  * Remove a plan add-on now and put the licensee back on their own license.
@@ -20,31 +20,24 @@ import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
  * The licensee's BASE license is never touched. An add-on sits beside it, so
  * "roll back" means removing the overlay, not re-enrolling a plan.
  *
- * ACCESS: `moil_admin` only, like granting.
+ * ACCESS: Moil admins (any licensee) and PARTNER ADMINS (their own licensees
+ * only). Granting stays Moil-only because it spends Moil's AI budget; removing
+ * only ever takes access away, so a partner may end an add-on on a person they
+ * licensed. "Their own" is decided from the licensee's BASE license — add-on
+ * rows carry no team or admin, so they cannot be scoped directly — using the
+ * same team/admin scoping every other license mutation here uses. Anything
+ * outside that scope answers 404, never 403, so the route cannot be used to
+ * probe which emails hold licenses elsewhere.
  */
 export async function POST(request: Request) {
   try {
     const supabase = await createClient();
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized. Please login.' }, { status: 401 });
+    const actorRes = await resolveLicenseActor(supabase);
+    if (!actorRes.ok) {
+      return NextResponse.json({ error: actorRes.error }, { status: actorRes.status });
     }
-
-    const { data: adminData, error: adminError } = await supabase
-      .from('admins')
-      .select('global_role, email')
-      .eq('id', user.id)
-      .single();
-    if (adminError || !adminData || !isMoilAdmin(adminData)) {
-      return NextResponse.json(
-        { error: 'Access denied. Moil admin access required.' },
-        { status: 403 }
-      );
-    }
+    const { actor } = actorRes;
 
     const { email, planTier } = await request.json();
 
@@ -63,6 +56,29 @@ export async function POST(request: Request) {
     }
     const tier = planTier ? (planTier as LicensePlan) : null;
     const normalizedEmail = email.toLowerCase();
+
+    // Partner admins: the licensee's base license must be in their scope.
+    if (!actor.isMoilAdmin) {
+      let scope = createAdminClient()
+        .from('licenses')
+        .select('id')
+        .eq('email', normalizedEmail)
+        .eq('grant_kind', 'base');
+      scope = actor.teamId
+        ? scope.eq('team_id', actor.teamId)
+        : scope.eq('admin_id', actor.userId);
+      const { data: ownBase, error: scopeError } = await scope.limit(1);
+      if (scopeError) {
+        console.error('[revoke-addon] scope lookup failed:', scopeError);
+        return NextResponse.json({ error: 'Could not verify access. Nothing was removed.' }, { status: 503 });
+      }
+      if (!ownBase || ownBase.length === 0) {
+        return NextResponse.json(
+          { error: 'This person has no active add-on to remove.', code: 'NO_ACTIVE_ADDON' },
+          { status: 404 }
+        );
+      }
+    }
 
     if (!process.env.NEXT_PUBLIC_QC_API_KEY || !process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION) {
       return NextResponse.json(
@@ -93,7 +109,7 @@ export async function POST(request: Request) {
           body: JSON.stringify({
             email: normalizedEmail,
             ...(tier ? { planTier: tier } : {}),
-            revokedBy: user.id,
+            revokedBy: actor.userId,
           }),
         }
       );
