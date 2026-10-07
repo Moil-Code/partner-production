@@ -1,10 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Download, RefreshCw, CheckCircle, Clock, Mail, AlertCircle, Send, Edit2, Check, X, Filter, Trash2, Undo2 } from 'lucide-react';
+import { Search, Download, RefreshCw, CheckCircle, Clock, Mail, AlertCircle, Send, Edit2, Check, X, Filter, Trash2 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { useToast } from '@/components/ui/toast/use-toast';
-import { ConfirmationModal } from '@/components/ui/confirmation-modal';
 
 interface License {
   id: string;
@@ -18,16 +17,6 @@ interface License {
   emailStatus?: string | null;
   lastReminderSentAt?: string | null;
   reminderCount?: number;
-}
-
-// A live plan add-on on one of this partner's licensees (Moil grants these; a
-// partner can only see and end them).
-interface Addon {
-  id: string;
-  email: string;
-  planTier: string | null;
-  expiresAt: string | null;
-  state: 'active' | 'scheduled';
 }
 
 interface PaginationInfo {
@@ -61,63 +50,6 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
   const [deleting, setDeleting] = useState(false);
   const [hasInitialSynced, setHasInitialSynced] = useState(false);
   const { toast } = useToast();
-
-  // Add-ons are keyed by licensee email. They are fetched separately because
-  // add-on rows are not seats and never appear in the license list itself.
-  const [addonsByEmail, setAddonsByEmail] = useState<Record<string, Addon>>({});
-  const [addonToRemove, setAddonToRemove] = useState<Addon | null>(null);
-  const [removingAddon, setRemovingAddon] = useState(false);
-
-  // Re-read whenever the list changes (page, search, or after a mutation), so a
-  // removed add-on disappears from its row without a manual refresh. A failed
-  // read just shows no badges — it must never break the license table.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch('/api/licenses/my-addons');
-        if (!res.ok) return;
-        const data = await res.json();
-        if (cancelled) return;
-        const map: Record<string, Addon> = {};
-        for (const a of data.addons || []) map[a.email] = a;
-        setAddonsByEmail(map);
-      } catch {
-        /* non-fatal */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [licenses]);
-
-  const handleRemoveAddon = async () => {
-    if (!addonToRemove) return;
-    setRemovingAddon(true);
-    try {
-      const response = await fetch('/api/licenses/revoke-addon', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: addonToRemove.email,
-          ...(addonToRemove.planTier ? { planTier: addonToRemove.planTier } : {}),
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to remove add-on');
-      toast({
-        title: data.creditsRestored === false ? 'Add-on removed — credits still pending' : 'Add-on removed',
-        description: data.message,
-        type: data.creditsRestored === false ? 'warning' : 'success',
-      });
-      setAddonToRemove(null);
-      onRefresh();
-    } catch (err: any) {
-      toast({ title: 'Error', description: err.message || 'An error occurred', type: 'error' });
-    } finally {
-      setRemovingAddon(false);
-    }
-  };
 
   // Debounced search - only trigger server search after user stops typing
   useEffect(() => {
@@ -523,18 +455,6 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
                       ) : (
                         <div className="flex items-center gap-2 group/email">
                           <span className="truncate max-w-[220px]" title={license.email}>{license.email}</span>
-                          {addonsByEmail[license.email.toLowerCase()] && (
-                            <span
-                              className="inline-flex items-center rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800"
-                              title="A temporary plan upgrade on top of this license"
-                            >
-                              Add-on · {addonsByEmail[license.email.toLowerCase()].planTier || 'plan'}
-                              {addonsByEmail[license.email.toLowerCase()].state === 'scheduled' ? ' (scheduled)' : ''}
-                              {addonsByEmail[license.email.toLowerCase()].expiresAt
-                                ? ` · until ${new Date(addonsByEmail[license.email.toLowerCase()].expiresAt as string).toLocaleDateString()}`
-                                : ''}
-                            </span>
-                          )}
                           {!license.isActivated && (
                             <button
                               onClick={() => handleEditEmail(license)}
@@ -617,18 +537,6 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
                     </td>
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end gap-2">
-                        {addonsByEmail[license.email.toLowerCase()] && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setAddonToRemove(addonsByEmail[license.email.toLowerCase()])}
-                            className="h-8 text-violet-700 hover:text-violet-800 hover:bg-violet-50"
-                            title="End this add-on now and put them back on their own license"
-                          >
-                            <Undo2 className="w-4 h-4 mr-1" />
-                            Remove add-on
-                          </Button>
-                        )}
                         {!license.isActivated && (
                           <Button 
                             variant="ghost" 
@@ -746,21 +654,6 @@ export function LicenseList({ licenses, loading, onRefresh, pagination, onPageCh
           </div>
         </div>
       )}
-
-      <ConfirmationModal
-        isOpen={!!addonToRemove}
-        onClose={() => !removingAddon && setAddonToRemove(null)}
-        onConfirm={handleRemoveAddon}
-        isLoading={removingAddon}
-        variant="warning"
-        title="Remove this add-on?"
-        description={
-          addonToRemove
-            ? `${addonToRemove.email} will lose the ${addonToRemove.planTier || 'add-on'} plan straight away and go back to their own license. Their license is not changed.`
-            : ''
-        }
-        confirmText="Remove add-on"
-      />
     </Card>
   );
 }
