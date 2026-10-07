@@ -43,6 +43,7 @@ export function GrantAddonModal({
   const [months, setMonths] = useState('1');
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [notEligible, setNotEligible] = useState<string | null>(null);
 
   // Re-seed when the modal is opened against a different licensee. Without
   // this the second row you click still shows the first row's email.
@@ -52,6 +53,7 @@ export function GrantAddonModal({
       setPlanTier('market_pro');
       setMonths('1');
       setNote('');
+      setNotEligible(null);
     }
   }, [isOpen, lockedEmail]);
 
@@ -66,6 +68,7 @@ export function GrantAddonModal({
     e.preventDefault();
     if (!canSubmit) return;
 
+    setNotEligible(null);
     setSubmitting(true);
     try {
       const response = await fetch('/api/licenses/grant-addon', {
@@ -82,6 +85,13 @@ export function GrantAddonModal({
       const data = await response.json();
 
       if (!response.ok) {
+        // Not a failure of the system — the person is simply not someone an
+        // add-on applies to. Kept on screen (a toast vanishes) so the operator
+        // reads which button to use instead.
+        if (data.code === 'NOT_ELIGIBLE') {
+          setNotEligible(data.error || 'This person cannot receive an add-on.');
+          return;
+        }
         throw new Error(data.error || 'Failed to grant add-on');
       }
 
@@ -145,10 +155,23 @@ export function GrantAddonModal({
           <strong className="font-medium text-[var(--text-primary)]">
             Their current license keeps running underneath
           </strong>{' '}
-          and they go back to it when the add-on ends. They must have already
-          activated that license. No seat is used, and the partner does not see
-          this.
+          and they go back to it when the add-on ends. They must already hold
+          an activated license{' '}
+          <strong className="font-medium text-[var(--text-primary)]">
+            given by a partner (not Moil)
+          </strong>
+          . For anyone else, use <em>Add License</em> instead. No seat is used,
+          and the partner does not see this.
         </p>
+
+        {notEligible && (
+          <div
+            role="alert"
+            className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+          >
+            {notEligible}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>

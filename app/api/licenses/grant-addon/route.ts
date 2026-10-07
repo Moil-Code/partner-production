@@ -34,9 +34,10 @@ import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
  * partner as well (see lib/addonLicense.ts): they did not issue it and are not
  * billed for it.
  *
- * ELIGIBILITY: the founder must already hold an ACTIVATED license. The Moil
+ * ELIGIBILITY: the founder must already hold an ACTIVATED license that a
+ * PARTNER gave them (not Moil itself, not a trial/promo/Stripe plan). The Moil
  * backend enforces that and answers `not_eligible`; nothing is stored for
- * someone who has not signed up or not activated.
+ * anyone else, and they are sent to "Add License" instead.
  */
 export async function POST(request: Request) {
   try {
@@ -178,14 +179,27 @@ export async function POST(request: Request) {
     // anyone who has not signed up, has no employer profile, or has not
     // activated, and nothing is stored anywhere: those founders go through the
     // ordinary license-assignment flow, which already invites and enrols them.
+    //
+    // The license must also have been given by a PARTNER. Someone on a trial,
+    // a promo, a Stripe plan, no license at all, or a license only Moil gave
+    // them is refused with `no_partner_license` / `moil_license_only`, and is
+    // pointed at "Add License" — an add-on is a short window on top of a
+    // partner's license, not a way to license a new person.
     if (moilResult.status === 'not_eligible') {
+      const needsLicense =
+        moilResult.reason === 'no_partner_license' ||
+        moilResult.reason === 'moil_license_only' ||
+        moilResult.reason === 'no_account' ||
+        moilResult.reason === 'no_profile';
       return NextResponse.json(
         {
           error:
             moilResult.message ||
-            'This person does not have an active license to add to.',
+            'This person does not have an active partner license to add to. Use "Add License" instead.',
           code: 'NOT_ELIGIBLE',
           reason: moilResult.reason || null,
+          // Tells the UI which button the operator should have used.
+          action: needsLicense ? 'ADD_LICENSE' : null,
         },
         { status: 409 }
       );
