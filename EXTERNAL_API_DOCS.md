@@ -329,9 +329,12 @@ All endpoints return errors in the following format:
 ## 4. Record Plan Add-on
 
 Mirror a time-boxed tier upgrade ("add-on") that the Moil backend has granted on
-top of a licensee's existing license — e.g. two months of Market Pro over a
-standard annual partner license. The base license keeps running underneath and
-the founder falls back to it when the add-on lapses.
+top of a client's existing active license — e.g. two months of Market Pro over a
+standard annual plan. The license can come from a partner, a Stripe subscription
+or Moil directly; an add-on is not limited to partner licensees. The base
+license keeps running underneath and the founder falls back to it when the
+add-on lapses. It takes effect on the server immediately, and a logged-in
+session picks it up within about a minute.
 
 **The Moil backend is authoritative.** It owns the grant's clock, the entitlement
 merge and the AI-credit overlay. This endpoint records the add-on so it is

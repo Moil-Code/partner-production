@@ -85,8 +85,8 @@ export function GrantAddonModal({
       const data = await response.json();
 
       if (!response.ok) {
-        // Not a failure of the system — the person is simply not someone an
-        // add-on applies to. Kept on screen (a toast vanishes) so the operator
+        // Not a failure of the system — the person simply has no active plan
+        // for an add-on to sit on. Kept on screen (a toast vanishes) so the operator
         // reads which button to use instead.
         if (data.code === 'NOT_ELIGIBLE') {
           setNotEligible(data.error || 'This person cannot receive an add-on.');
@@ -155,12 +155,14 @@ export function GrantAddonModal({
           <strong className="font-medium text-[var(--text-primary)]">
             Their current license keeps running underneath
           </strong>{' '}
-          and they go back to it when the add-on ends. They must already hold
-          an activated license{' '}
+          and they go back to it when the add-on ends. They must already have a
+          Moil account with an{' '}
           <strong className="font-medium text-[var(--text-primary)]">
-            given by a partner (not Moil)
-          </strong>
-          . For anyone else, use <em>Add License</em> instead. No seat is used,
+            active license or subscription
+          </strong>{' '}
+          — one from a partner, a paid plan, or one Moil gave them. It takes
+          effect straight away, even if they are logged in. For anyone without
+          an active plan, use <em>Add License</em> instead. No seat is used,
           and the partner does not see this.
         </p>
 

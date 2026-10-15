@@ -12,10 +12,12 @@ import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
 /**
  * Grant a time-boxed plan add-on from the Moil admin dashboard.
  *
- * A licensee already holding a license (say a partner's Starter Annual) gets,
- * for N months, a higher tier on top — Market Pro, typically, for Moil360.
- * Their base license keeps running underneath the whole time and they fall
- * back to it when the add-on lapses.
+ * Anyone holding an ACTIVE license or subscription (a partner's Starter Annual,
+ * a Standard Yearly they pay for, a plan Moil gave them) gets, for N months, a
+ * higher tier on top — Market Pro, typically, for Moil360. Their base plan
+ * keeps running underneath the whole time and they fall back to it when the
+ * add-on lapses. It takes effect immediately, including for someone who is
+ * logged in right now.
  *
  * TWO SIDES, AND THE ORDER MATTERS.
  *
@@ -34,10 +36,11 @@ import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
  * partner as well (see lib/addonLicense.ts): they did not issue it and are not
  * billed for it.
  *
- * ELIGIBILITY: the founder must already hold an ACTIVATED license that a
- * PARTNER gave them (not Moil itself, not a trial/promo/Stripe plan). The Moil
- * backend enforces that and answers `not_eligible`; nothing is stored for
- * anyone else, and they are sent to "Add License" instead.
+ * ELIGIBILITY: the founder must have a Moil account and an ACTIVE license or
+ * subscription to sit on. WHO ISSUED IT DOES NOT MATTER — partner seats, Stripe
+ * subscriptions and Moil-given plans all qualify. The Moil backend enforces
+ * that and answers `not_eligible`; nothing is stored for anyone else, and they
+ * are sent to "Add License" instead.
  */
 export async function POST(request: Request) {
   try {
@@ -175,17 +178,19 @@ export async function POST(request: Request) {
     }
 
     // An add-on tops up a license that is ALREADY ACTIVE — it widens what a
-    // live license can do, so it needs one to sit on. The Moil backend refuses
-    // anyone who has not signed up, has no employer profile, or has not
-    // activated, and nothing is stored anywhere: those founders go through the
-    // ordinary license-assignment flow, which already invites and enrols them.
+    // live plan can do, so it needs one to sit on. The Moil backend refuses
+    // anyone who has not signed up, has no employer profile, or whose plan is
+    // not active, and nothing is stored anywhere: those founders go through
+    // the ordinary license-assignment flow, which already invites and enrols
+    // them.
     //
-    // The license must also have been given by a PARTNER. Someone on a trial,
-    // a promo, a Stripe plan, no license at all, or a license only Moil gave
-    // them is refused with `no_partner_license` / `moil_license_only`, and is
-    // pointed at "Add License" — an add-on is a short window on top of a
-    // partner's license, not a way to license a new person.
+    // Who issued the plan is NOT part of that test. A partner seat, a plan the
+    // founder pays for and one Moil gave them all qualify; only an absent or
+    // lapsed plan is refused.
     if (moilResult.status === 'not_eligible') {
+      // `no_partner_license` / `moil_license_only` are retired reasons: an
+      // older Moil backend can still send them until it is redeployed, so they
+      // keep pointing the operator at "Add License" rather than going silent.
       const needsLicense =
         moilResult.reason === 'no_partner_license' ||
         moilResult.reason === 'moil_license_only' ||
@@ -195,7 +200,7 @@ export async function POST(request: Request) {
         {
           error:
             moilResult.message ||
-            'This person does not have an active partner license to add to. Use "Add License" instead.',
+            'This person does not have an active license to add to. Use "Add License" instead.',
           code: 'NOT_ELIGIBLE',
           reason: moilResult.reason || null,
           // Tells the UI which button the operator should have used.
