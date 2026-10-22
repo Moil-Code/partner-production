@@ -151,6 +151,10 @@ export async function POST(request: Request) {
           results.push({ index, status: 'invalid', detail: 'activatedAt must be ISO 8601' });
           continue;
         }
+        if (parsed.getTime() > Date.now() + 5 * 60_000) {
+          results.push({ index, status: 'invalid', detail: 'activatedAt is in the future' });
+          continue;
+        }
         activatedAt = parsed.toISOString();
       }
 

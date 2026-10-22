@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import TeamManagement from '@/components/TeamManagement';
@@ -67,6 +67,9 @@ const DashboardPage = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  // Bumped by every foreground fetch so a slower background refresh that was
+  // already in flight can tell it is stale and drop its result.
+  const fetchSeq = useRef(0);
   
   const [showPurchaseModal, setShowPurchaseModal] = useState(false);
   const [purchasing, setPurchasing] = useState(false);
@@ -143,6 +146,7 @@ const DashboardPage = () => {
   };
 
   const initialFetchLicenses = async () => {
+    fetchSeq.current += 1;
     try {
       setLoading(true);
       const params = new URLSearchParams({
@@ -240,6 +244,7 @@ const DashboardPage = () => {
   };
 
   const fetchLicenses = useCallback(async (page?: number, search?: string, status?: string) => {
+    fetchSeq.current += 1;
     try {
       setLoading(true);
       const params = new URLSearchParams({
@@ -278,6 +283,7 @@ const DashboardPage = () => {
   // Activation happens in the Moil app, so this page can't learn of it any
   // other way than asking again.
   const silentRefresh = useCallback(async () => {
+    const seq = fetchSeq.current;
     try {
       const params = new URLSearchParams({
         page: currentPage.toString(),
@@ -288,6 +294,7 @@ const DashboardPage = () => {
       const response = await fetch(`/api/licenses/list?${params}`);
       if (!response.ok) return;
       const data = await response.json();
+      if (seq !== fetchSeq.current) return;
       setLicenses(data.licenses);
       setStatistics(data.statistics);
       setPagination(data.pagination);
