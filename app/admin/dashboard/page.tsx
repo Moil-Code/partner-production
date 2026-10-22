@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import TeamManagement from '@/components/TeamManagement';
@@ -67,6 +67,9 @@ const DashboardPage = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  // Bumped by every foreground fetch so a slower background refresh that was
+  // already in flight can tell it is stale and drop its result.
+  const fetchSeq = useRef(0);
   
   const [showPurchaseModal, setShowPurchaseModal] = useState(false);
   const [purchasing, setPurchasing] = useState(false);
@@ -143,6 +146,7 @@ const DashboardPage = () => {
   };
 
   const initialFetchLicenses = async () => {
+    fetchSeq.current += 1;
     try {
       setLoading(true);
       const params = new URLSearchParams({
@@ -240,6 +244,7 @@ const DashboardPage = () => {
   };
 
   const fetchLicenses = useCallback(async (page?: number, search?: string, status?: string) => {
+    fetchSeq.current += 1;
     try {
       setLoading(true);
       const params = new URLSearchParams({
@@ -272,6 +277,46 @@ const DashboardPage = () => {
       setLoading(false);
     }
   }, [currentPage, searchQuery, statusFilter, router, toast]);
+
+  // Background refresh: same query as fetchLicenses but without the loading
+  // flag or error toast, so a poll never flickers the table or nags the user.
+  // Activation happens in the Moil app, so this page can't learn of it any
+  // other way than asking again.
+  const silentRefresh = useCallback(async () => {
+    const seq = fetchSeq.current;
+    try {
+      const params = new URLSearchParams({
+        page: currentPage.toString(),
+        limit: '50',
+        ...(searchQuery && { search: searchQuery }),
+        ...(statusFilter && { status: statusFilter }),
+      });
+      const response = await fetch(`/api/licenses/list?${params}`);
+      if (!response.ok) return;
+      const data = await response.json();
+      if (seq !== fetchSeq.current) return;
+      setLicenses(data.licenses);
+      setStatistics(data.statistics);
+      setPagination(data.pagination);
+    } catch (err) {
+      console.error('Background license refresh failed:', err);
+    }
+  }, [currentPage, searchQuery, statusFilter]);
+
+  useEffect(() => {
+    const REFRESH_MS = 60_000;
+    const refreshIfVisible = () => {
+      if (document.visibilityState === 'visible') silentRefresh();
+    };
+    const interval = setInterval(refreshIfVisible, REFRESH_MS);
+    document.addEventListener('visibilitychange', refreshIfVisible);
+    window.addEventListener('focus', refreshIfVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshIfVisible);
+      window.removeEventListener('focus', refreshIfVisible);
+    };
+  }, [silentRefresh]);
 
   const handlePageChange = useCallback((newPage: number) => {
     setCurrentPage(newPage);

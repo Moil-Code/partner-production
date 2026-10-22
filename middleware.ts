@@ -51,6 +51,9 @@ export async function middleware(request: NextRequest) {
     // would receive an HTML page with a 200 — a failure that looks like
     // success to anything not inspecting the content type.
     request.nextUrl.pathname.startsWith('/api/licenses/assignments') ||
+    // Moil backend sweep that marks already-signed-up users' seats Activated.
+    // Enforces the shared secret itself (fails closed), no session.
+    request.nextUrl.pathname.startsWith('/api/licenses/reconcile') ||
     request.nextUrl.pathname.startsWith('/api/licenses/purchase') ||
     request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||
     request.nextUrl.pathname.startsWith('/api/signup/') ||
