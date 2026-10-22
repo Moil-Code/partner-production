@@ -626,6 +626,59 @@ render alike.
 
 ---
 
+## 7. Reconcile Seat Status
+
+Marks seats **Activated** for users the Moil backend already knows about. Needed
+because this app never sees a login: a seat flips only when Moil calls
+`/activate`, which requires business info, so users who signed up without
+finishing their profile (or whose `/activate` call failed) stay "Pending".
+
+### Endpoint
+
+```
+POST /api/licenses/reconcile
+```
+
+### Authentication
+
+Shared secret (`x-internal-api-key` or `x-api-key`; `INTERNAL_API_KEY` or
+`MOIL_INTERNAL_API_KEY`). Returns `503` when unset, `401` on mismatch.
+
+### Request Body
+
+```json
+{
+  "dryRun": false,
+  "items": [
+    {
+      "licenseId": "uuid (preferred)",
+      "email": "used only when licenseId is absent",
+      "moilUserId": "required",
+      "businessName": "optional",
+      "businessType": "optional",
+      "activatedAt": "optional ISO 8601; defaults to now"
+    }
+  ]
+}
+```
+
+Max 500 items. Base seats only; add-on rows are rejected. Email fallback matches
+case-insensitively and only when exactly one pending seat has that address;
+otherwise the item is reported `notFound` / `ambiguous`. Already-activated seats
+are left untouched (`alreadyActivated`). `business_name`, `business_type` and
+`moil_user_id` are fill-if-empty. `dryRun: true` reports `would_activate`
+without writing.
+
+### Response
+
+```json
+{ "success": true, "dryRun": false,
+  "summary": { "activated": 3, "notFound": 1 },
+  "results": [{ "index": 0, "licenseId": "…", "status": "activated" }] }
+```
+
+---
+
 ## Typical Flow
 
 1. **Admin purchases licenses** → Payment provider calls `/api/licenses/purchase` to add licenses to the admin's team
