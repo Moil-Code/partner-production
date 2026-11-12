@@ -264,6 +264,88 @@ export default function MoilAdminDashboard() {
     }
   };
 
+  // ── Licenses tab search & filters ────────────────────────────────────
+  // Local rather than the uiStore's moilAdminSearchQuery: that one is shared
+  // by the Partners and Teams tabs, and a partner name typed there would
+  // otherwise silently empty this list.
+  const [licenseSearch, setLicenseSearch] = React.useState('');
+  const [licenseStatusFilter, setLicenseStatusFilter] =
+    React.useState<'all' | 'pending' | 'activated'>('all');
+  const [licenseEmailFilter, setLicenseEmailFilter] =
+    React.useState<'all' | 'not_sent' | 'unopened' | 'opened' | 'clicked' | 'bounced'>('all');
+  const [licensePlanFilter, setLicensePlanFilter] = React.useState<'all' | LicensePlan>('all');
+  const [licenseCreatedFilter, setLicenseCreatedFilter] =
+    React.useState<'all' | '7' | '30' | '90'>('all');
+
+  const licenseFiltersActive =
+    licenseSearch.trim() !== '' ||
+    licenseStatusFilter !== 'all' ||
+    licenseEmailFilter !== 'all' ||
+    licensePlanFilter !== 'all' ||
+    licenseCreatedFilter !== 'all';
+
+  const clearLicenseFilters = () => {
+    setLicenseSearch('');
+    setLicenseStatusFilter('all');
+    setLicenseEmailFilter('all');
+    setLicensePlanFilter('all');
+    setLicenseCreatedFilter('all');
+  };
+
+  const searchTerm = licenseSearch.trim().toLowerCase();
+  const createdCutoff =
+    licenseCreatedFilter === 'all'
+      ? null
+      : Date.now() - Number(licenseCreatedFilter) * 24 * 60 * 60 * 1000;
+
+  const filteredLicenses = licenses.filter((l) => {
+    if (
+      searchTerm &&
+      !String(l.email || '').toLowerCase().includes(searchTerm) &&
+      !String(l.business_name || '').toLowerCase().includes(searchTerm)
+    ) {
+      return false;
+    }
+    if (licenseStatusFilter === 'pending' && l.is_activated) return false;
+    if (licenseStatusFilter === 'activated' && !l.is_activated) return false;
+    if (licensePlanFilter !== 'all' && l.plan_tier !== licensePlanFilter) return false;
+    if (createdCutoff !== null && new Date(l.created_at).getTime() < createdCutoff) return false;
+    if (licenseEmailFilter !== 'all') {
+      const stage = licenseEmailStage(l);
+      switch (licenseEmailFilter) {
+        case 'not_sent':
+          if (stage !== 'none') return false;
+          break;
+        // Went out, never bounced, no sign of an open: the people to chase.
+        case 'unopened':
+          if (stage !== 'sent' && stage !== 'delivered') return false;
+          break;
+        // Stages are cumulative — a click implies an open.
+        case 'opened':
+          if (stage !== 'opened' && stage !== 'clicked') return false;
+          break;
+        case 'clicked':
+          if (stage !== 'clicked') return false;
+          break;
+        case 'bounced':
+          if (stage !== 'undeliverable') return false;
+          break;
+      }
+    }
+    return true;
+  });
+
+  // The search box also narrows the add-ons panel, so looking someone up
+  // shows their seat and any add-on together. The other filters describe
+  // seats (activation, emails) and do not apply to add-ons.
+  const filteredAddons = searchTerm
+    ? addons.filter(
+        (a) =>
+          a.email.toLowerCase().includes(searchTerm) ||
+          (a.partnerName || '').toLowerCase().includes(searchTerm)
+      )
+    : addons;
+
   const exportStamp = () => new Date().toISOString().split('T')[0];
 
   // Exports what this tab shows, from what is already loaded — no second
@@ -287,7 +369,9 @@ export default function MoilAdminDashboard() {
       'First Clicked',
       'Bounce / Complaint',
     ];
-    const rows = licenses.map((l) => [
+    // Exports exactly what the filters show — "export the bounced ones" is
+    // the common case, and a full export is one "Clear filters" away.
+    const rows = filteredLicenses.map((l) => [
       l.email,
       l.business_name || '',
       l.is_activated ? 'Activated' : 'Pending',
@@ -316,7 +400,7 @@ export default function MoilAdminDashboard() {
 
   const handleExportAddons = () => {
     const headers = ['Email', 'Add-on', 'State', 'Starts', 'Ends', 'Partner', 'Base Plan', 'Base Billing Cycle'];
-    const rows = addons.map((a) => [
+    const rows = filteredAddons.map((a) => [
       a.email,
       a.planTier,
       a.state ?? (a.active ? 'active' : 'expired'),
@@ -1404,12 +1488,12 @@ export default function MoilAdminDashboard() {
         {activeTab === 'licenses' && (
           <Card variant="glass">
             <CardHeader>
-              <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <CardTitle className="text-[var(--text-primary)]">Licenses</CardTitle>
                   <CardDescription>All licenses created from your Moil admin account</CardDescription>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   {/*
                     Two different actions, deliberately side by side and
                     deliberately labelled differently: a license is what
@@ -1419,11 +1503,15 @@ export default function MoilAdminDashboard() {
                   <Button
                     variant="outline"
                     onClick={handleExportLicenses}
-                    disabled={licensesLoading || licenses.length === 0}
-                    title="Download the licenses below as a CSV"
+                    disabled={licensesLoading || filteredLicenses.length === 0}
+                    title={
+                      licenseFiltersActive
+                        ? 'Download the filtered licenses as a CSV'
+                        : 'Download the licenses below as a CSV'
+                    }
                   >
                     <Download className="w-4 h-4 mr-2" />
-                    Export
+                    {licenseFiltersActive ? `Export ${filteredLicenses.length}` : 'Export'}
                   </Button>
                   <Button variant="outline" onClick={() => setShowGrantAddonModal(true)}>
                     <Sparkles className="w-4 h-4 mr-2" />
@@ -1437,6 +1525,102 @@ export default function MoilAdminDashboard() {
               </div>
             </CardHeader>
             <CardContent>
+              {/* Search & filters — above the add-ons panel because the
+                  search narrows both lists. */}
+              <div className="mb-6 flex flex-col gap-3">
+                <div className="flex flex-col lg:flex-row gap-3">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-tertiary)]" />
+                    <input
+                      type="search"
+                      placeholder="Search by email or business name..."
+                      value={licenseSearch}
+                      onChange={(e) => setLicenseSearch(e.target.value)}
+                      aria-label="Search licenses"
+                      className="w-full pl-10 pr-4 py-2.5 bg-[var(--surface-subtle)] border border-[var(--border)] rounded-xl focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/20 focus:border-[var(--primary)] transition-all text-sm text-[var(--text-primary)] placeholder-[var(--text-tertiary)]"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {[
+                      {
+                        label: 'Status',
+                        value: licenseStatusFilter,
+                        set: (v: string) => setLicenseStatusFilter(v as typeof licenseStatusFilter),
+                        options: [
+                          ['all', 'All statuses'],
+                          ['pending', 'Pending'],
+                          ['activated', 'Activated'],
+                        ],
+                      },
+                      {
+                        label: 'Email',
+                        value: licenseEmailFilter,
+                        set: (v: string) => setLicenseEmailFilter(v as typeof licenseEmailFilter),
+                        options: [
+                          ['all', 'All email activity'],
+                          ['unopened', 'Sent, not opened'],
+                          ['opened', 'Opened'],
+                          ['clicked', 'Clicked'],
+                          ['bounced', 'Bounced / spam'],
+                          ['not_sent', 'No email sent'],
+                        ],
+                      },
+                      {
+                        label: 'Plan',
+                        value: licensePlanFilter,
+                        set: (v: string) => setLicensePlanFilter(v as typeof licensePlanFilter),
+                        options: [
+                          ['all', 'All plans'],
+                          ...LICENSE_PLANS.map((p) => [p, PLAN_LABELS[p]]),
+                        ],
+                      },
+                      {
+                        label: 'Created',
+                        value: licenseCreatedFilter,
+                        set: (v: string) => setLicenseCreatedFilter(v as typeof licenseCreatedFilter),
+                        options: [
+                          ['all', 'Any time'],
+                          ['7', 'Last 7 days'],
+                          ['30', 'Last 30 days'],
+                          ['90', 'Last 90 days'],
+                        ],
+                      },
+                    ].map((f) => (
+                      <select
+                        key={f.label}
+                        aria-label={`Filter by ${f.label.toLowerCase()}`}
+                        value={f.value}
+                        onChange={(e) => f.set(e.target.value)}
+                        className={`px-3 py-2.5 rounded-xl border text-sm bg-[var(--surface-subtle)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/20 focus:border-[var(--primary)] ${
+                          f.value !== 'all' ? 'border-[var(--primary)]' : 'border-[var(--border)]'
+                        }`}
+                      >
+                        {f.options.map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    ))}
+                  </div>
+                </div>
+                {licenseFiltersActive && !licensesLoading && (
+                  <div className="flex items-center gap-3 text-sm text-[var(--text-secondary)]">
+                    <span>
+                      Showing {filteredLicenses.length} of {licenses.length} licenses
+                    </span>
+                    <button
+                      type="button"
+                      onClick={clearLicenseFilters}
+                      className="inline-flex items-center gap-1 font-medium text-[var(--primary)] hover:underline"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Clear filters
+                    </button>
+                  </div>
+                )}
+              </div>
+
               {/*
                 Granted add-ons. Shown here because these rows deliberately
                 carry no team_id/admin_id — that is what keeps them out of the
@@ -1480,7 +1664,14 @@ export default function MoilAdminDashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {addons.map((a) => (
+                        {filteredAddons.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="py-3 text-sm text-[var(--text-tertiary)]">
+                              No add-ons match &ldquo;{licenseSearch.trim()}&rdquo;.
+                            </td>
+                          </tr>
+                        )}
+                        {filteredAddons.map((a) => (
                           <tr key={a.id} className="border-b border-violet-100 last:border-0">
                             <td className="py-2 pr-4 text-[var(--text-primary)]">{a.email}</td>
                             <td className="py-2 pr-4">
@@ -1573,24 +1764,31 @@ export default function MoilAdminDashboard() {
                     pre-fetches images), so "Clicked" and "Activated" are the
                     numbers to trust.
                   */}
-                  {licenses.length > 0 && (() => {
-                    const pending = licenses.filter((l) => !l.is_activated);
-                    const stages = licenses.map((l) => licenseEmailStage(l));
+                  {filteredLicenses.length > 0 && (() => {
+                    // Summarises what the filters show, so e.g. "Created: last
+                    // 30 days" gives that cohort's funnel.
+                    const pending = filteredLicenses.filter((l) => !l.is_activated);
+                    const stages = filteredLicenses.map((l) => licenseEmailStage(l));
                     const atLeast = (...ok: string[]) => stages.filter((st) => ok.includes(st)).length;
-                    const sentTotal = licenses.reduce((n, l) => n + licenseEmailsSent(l), 0);
+                    const sentTotal = filteredLicenses.reduce((n, l) => n + licenseEmailsSent(l), 0);
                     const tiles = [
                       { label: 'Emails sent', value: sentTotal, hint: 'activation + reminders' },
                       { label: 'Delivered', value: atLeast('delivered', 'opened', 'clicked') },
                       { label: 'Opened', value: atLeast('opened', 'clicked') },
                       { label: 'Clicked', value: atLeast('clicked') },
                       { label: 'Bounced', value: atLeast('undeliverable'), danger: true },
-                      { label: 'Activated', value: licenses.length - pending.length, hint: `of ${licenses.length}` },
+                      { label: 'Activated', value: filteredLicenses.length - pending.length, hint: `of ${filteredLicenses.length}` },
                     ];
                     return (
                       <div className="mb-6 rounded-xl border border-[var(--border)] p-4">
                         <div className="flex items-center gap-2 mb-3">
                           <Mail className="w-4 h-4 text-[var(--text-secondary)]" />
-                          <h3 className="flex-1 font-semibold text-[var(--text-primary)]">Activation emails</h3>
+                          <h3 className="flex-1 font-semibold text-[var(--text-primary)]">
+                            Activation emails
+                            {licenseFiltersActive && (
+                              <span className="ml-2 text-xs font-normal text-[var(--text-tertiary)]">filtered</span>
+                            )}
+                          </h3>
                           <button
                             type="button"
                             onClick={handleSyncEmailStatus}
@@ -1634,7 +1832,7 @@ export default function MoilAdminDashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {licenses.map((license) => (
+                        {filteredLicenses.map((license) => (
                           <tr key={license.id} className="border-b border-[var(--border)] hover:bg-[var(--surface-subtle)] transition-colors">
                             <td className="py-4 px-4">
                               {editingLicenseId === license.id ? (
@@ -1787,6 +1985,19 @@ export default function MoilAdminDashboard() {
                         ))}
                       </tbody>
                     </table>
+                    {licenses.length > 0 && filteredLicenses.length === 0 && (
+                      <div className="text-center py-12">
+                        <Search className="w-12 h-12 text-[var(--text-tertiary)] mx-auto mb-4" />
+                        <p className="text-[var(--text-secondary)] mb-2">No licenses match these filters</p>
+                        <button
+                          type="button"
+                          onClick={clearLicenseFilters}
+                          className="text-sm font-medium text-[var(--primary)] hover:underline"
+                        >
+                          Clear filters
+                        </button>
+                      </div>
+                    )}
                     {licenses.length === 0 && (
                       <div className="text-center py-12">
                         <Key className="w-12 h-12 text-[var(--text-tertiary)] mx-auto mb-4" />
