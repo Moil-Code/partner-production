@@ -62,9 +62,27 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Per-seat email history from the Resend webhook
+    // (database/add_email_tracking.sql). Optional: until that migration runs
+    // the view does not exist, and the list must still load — the dashboard
+    // falls back to email_status / reminder_count.
+    const { data: emailStats, error: emailStatsError } = await supabase
+      .from('license_email_stats')
+      .select(
+        'license_id, sends, last_sent_at, first_delivered_at, first_opened_at, last_opened_at, opens, first_clicked_at, clicks, bounced_at, complained_at, bounce_reason'
+      )
+      .eq('admin_id', adminId);
+    if (emailStatsError) {
+      console.warn('license_email_stats unavailable:', emailStatsError.message);
+    }
+    const statsByLicense = new Map((emailStats || []).map((row) => [row.license_id, row]));
+
     return NextResponse.json(
       { 
-        licenses: licenses || [],
+        licenses: (licenses || []).map((l) => ({
+          ...l,
+          email_stats: statsByLicense.get(l.id) ?? null,
+        })),
         count: licenses?.length || 0
       },
       { status: 200 }

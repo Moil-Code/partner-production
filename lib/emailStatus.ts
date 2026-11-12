@@ -21,7 +21,7 @@ export const OUTBOUND_EMAIL_STATES = [
 ] as const;
 
 /** Resend says it never arrived, or the recipient marked it as spam. */
-export const UNDELIVERABLE_EMAIL_STATES = ['bounced', 'complained', 'failed'] as const;
+export const UNDELIVERABLE_EMAIL_STATES = ['bounced', 'complained', 'suppressed', 'failed'] as const;
 
 /**
  * Funnel stage, highest first. A status implies every stage below it: a
@@ -42,6 +42,7 @@ export function emailFunnelStage(
       return 'sent';
     case 'bounced':
     case 'complained':
+    case 'suppressed':
     case 'failed':
       return 'undeliverable';
     default:
@@ -64,4 +65,60 @@ export function emailsSentCount(license: {
     !!license.activation_email_sent_at ||
     (stage !== 'none' && license.email_status !== 'failed');
   return (originalWentOut ? 1 : 0) + (license.reminder_count || 0);
+}
+
+/**
+ * Per-seat rollup from the license_email_stats view (Resend webhook data).
+ * Null when the seat has no recorded sends or the migration has not run.
+ */
+export interface LicenseEmailStats {
+  sends: number;
+  last_sent_at: string | null;
+  first_delivered_at: string | null;
+  first_opened_at: string | null;
+  last_opened_at: string | null;
+  opens: number;
+  first_clicked_at: string | null;
+  clicks: number;
+  bounced_at: string | null;
+  complained_at: string | null;
+  bounce_reason: string | null;
+}
+
+type LicenseEmailFields = {
+  activation_email_sent_at?: string | null;
+  last_reminder_sent_at?: string | null;
+  email_status?: string | null;
+  reminder_count?: number | null;
+  email_stats?: LicenseEmailStats | null;
+};
+
+/**
+ * Furthest stage across EVERY email sent to the seat when webhook data
+ * exists (an opened reminder counts), else the last synced email_status.
+ */
+export function licenseEmailStage(license: LicenseEmailFields): ReturnType<typeof emailFunnelStage> {
+  const st = license.email_stats;
+  if (st) {
+    if (st.bounced_at || st.complained_at) return 'undeliverable';
+    if (st.first_clicked_at) return 'clicked';
+    if (st.first_opened_at) return 'opened';
+    if (st.first_delivered_at) return 'delivered';
+  }
+  const fallback = emailFunnelStage(license.email_status);
+  return st && fallback === 'none' ? 'sent' : fallback;
+}
+
+/** Lifetime count when webhook data exists, else the current-cycle floor. */
+export function licenseEmailsSent(license: LicenseEmailFields): number {
+  return license.email_stats?.sends ?? emailsSentCount(license);
+}
+
+export function licenseLastEmailAt(license: LicenseEmailFields): string | null {
+  return (
+    license.email_stats?.last_sent_at ||
+    license.last_reminder_sent_at ||
+    license.activation_email_sent_at ||
+    null
+  );
 }

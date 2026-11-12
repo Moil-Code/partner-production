@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendLicenseActivationReminderEmail, type EdcEmailInfo } from '@/lib/email';
 import { OUTBOUND_EMAIL_STATES } from '@/lib/emailStatus';
+import { recordLicenseEmails } from '@/lib/licenseEmailLog';
 
 const REMINDER_INTERVAL_DAYS = 15;
 const MAX_REMINDERS = 4;
@@ -177,6 +178,12 @@ async function handle(request: NextRequest) {
       );
       continue;
     }
+
+    // Reminders never touched message_id, so before this nothing about them —
+    // opened, bounced, ignored — was knowable.
+    await recordLicenseEmails(supabase, [
+      { messageId: result.messageId, licenseId: license.id, kind: 'reminder', recipient: license.email },
+    ]);
 
     const { error: updateError } = await supabase
       .from('licenses')

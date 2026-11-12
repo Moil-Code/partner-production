@@ -56,6 +56,11 @@ export async function middleware(request: NextRequest) {
     request.nextUrl.pathname.startsWith('/api/licenses/reconcile') ||
     request.nextUrl.pathname.startsWith('/api/licenses/purchase') ||
     request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||
+    // Resend delivery/open/click events. No session; verifies the Svix
+    // signature itself and fails closed when RESEND_WEBHOOK_SECRET is unset.
+    // Without this entry Resend would get a redirect, count it as a failed
+    // delivery, and eventually disable the endpoint.
+    request.nextUrl.pathname.startsWith('/api/webhooks/resend') ||
     request.nextUrl.pathname.startsWith('/api/signup/') ||
     request.nextUrl.pathname.startsWith('/api/partners/approve') ||
     request.nextUrl.pathname.startsWith('/api/partners/grant-access') ||

@@ -20,7 +20,13 @@ import {
   type LicensePlan,
 } from '@/lib/licensePlanDefaults';
 import { toCsv, downloadCsv, isoDate } from '@/lib/csv';
-import { emailFunnelStage, emailsSentCount } from '@/lib/emailStatus';
+import {
+  emailFunnelStage,
+  licenseEmailStage,
+  licenseEmailsSent,
+  licenseLastEmailAt,
+  type LicenseEmailStats,
+} from '@/lib/emailStatus';
 
 const PLAN_LABELS: Record<LicensePlan, string> = {
   standard: 'Standard',
@@ -272,10 +278,14 @@ export default function MoilAdminDashboard() {
       'Expires',
       'Created',
       'Activated',
-      'Email Status',
+      'Email Stage',
       'Emails Sent',
-      'Activation Email Sent',
-      'Last Reminder Sent',
+      'Last Email Sent',
+      'Opens',
+      'First Opened',
+      'Clicks',
+      'First Clicked',
+      'Bounce / Complaint',
     ];
     const rows = licenses.map((l) => [
       l.email,
@@ -286,10 +296,20 @@ export default function MoilAdminDashboard() {
       isoDate(l.expires_at),
       isoDate(l.created_at),
       isoDate(l.activated_at),
-      l.email_status || '',
-      emailsSentCount(l),
-      isoDate(l.activation_email_sent_at),
-      isoDate(l.last_reminder_sent_at),
+      licenseEmailStage(l) === 'none' ? '' : licenseEmailStage(l),
+      licenseEmailsSent(l),
+      isoDate(licenseLastEmailAt(l)),
+      // Blank, not 0, when there is no webhook data: "never opened" and
+      // "we cannot know" must not look the same in a spreadsheet.
+      l.email_stats ? l.email_stats.opens : '',
+      isoDate(l.email_stats?.first_opened_at),
+      l.email_stats ? l.email_stats.clicks : '',
+      isoDate(l.email_stats?.first_clicked_at),
+      l.email_stats?.complained_at
+        ? 'Marked as spam'
+        : l.email_stats?.bounced_at
+        ? l.email_stats.bounce_reason || 'Bounced'
+        : '',
     ]);
     downloadCsv(`moil-licenses-${exportStamp()}.csv`, toCsv(headers, rows));
   };
@@ -1555,9 +1575,9 @@ export default function MoilAdminDashboard() {
                   */}
                   {licenses.length > 0 && (() => {
                     const pending = licenses.filter((l) => !l.is_activated);
-                    const stages = licenses.map((l) => emailFunnelStage(l.email_status));
+                    const stages = licenses.map((l) => licenseEmailStage(l));
                     const atLeast = (...ok: string[]) => stages.filter((st) => ok.includes(st)).length;
-                    const sentTotal = licenses.reduce((n, l) => n + emailsSentCount(l), 0);
+                    const sentTotal = licenses.reduce((n, l) => n + licenseEmailsSent(l), 0);
                     const tiles = [
                       { label: 'Emails sent', value: sentTotal, hint: 'activation + reminders' },
                       { label: 'Delivered', value: atLeast('delivered', 'opened', 'clicked') },
@@ -1576,7 +1596,7 @@ export default function MoilAdminDashboard() {
                             onClick={handleSyncEmailStatus}
                             disabled={syncingEmailStatus || pending.length === 0}
                             className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-subtle)] disabled:opacity-50"
-                            title="Ask Resend for the latest delivered / opened / clicked state of pending seats"
+                            title="Events arrive automatically via the Resend webhook. This re-asks Resend for pending seats — useful for mail sent before the webhook was set up."
                           >
                             <RefreshCw className={`h-3.5 w-3.5 ${syncingEmailStatus ? 'animate-spin' : ''}`} />
                             {syncingEmailStatus ? 'Checking…' : 'Refresh status'}
@@ -1683,25 +1703,38 @@ export default function MoilAdminDashboard() {
                             </td>
                             <td className="py-4 px-4 text-sm">
                               {(() => {
-                                const badge = EMAIL_STAGE_BADGE[emailFunnelStage(license.email_status)];
-                                const sent = emailsSentCount(license);
-                                const lastSent = license.last_reminder_sent_at || license.activation_email_sent_at;
+                                const stats = license.email_stats as LicenseEmailStats | null;
+                                const badge = EMAIL_STAGE_BADGE[licenseEmailStage(license)];
+                                const sent = licenseEmailsSent(license);
+                                const lastSent = licenseLastEmailAt(license);
                                 if (!badge && sent === 0) {
                                   return <span className="text-[var(--text-tertiary)]">-</span>;
                                 }
                                 return (
                                   <div>
                                     {badge && (
-                                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${badge.className}`}>
-                                        {badge.label}
+                                      <span
+                                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${badge.className}`}
+                                        title={
+                                          stats?.complained_at
+                                            ? 'They marked an email as spam'
+                                            : stats?.bounce_reason || undefined
+                                        }
+                                      >
+                                        {stats?.complained_at ? 'Spam' : badge.label}
                                       </span>
                                     )}
                                     {sent > 0 && (
                                       <p
                                         className="mt-1 text-xs text-[var(--text-tertiary)]"
-                                        title="Activation email plus automatic reminders since the last manual resend"
+                                        title={
+                                          stats
+                                            ? 'Every email sent about this seat: activation, resends and reminders'
+                                            : 'Activation email plus automatic reminders since the last manual resend'
+                                        }
                                       >
                                         {sent} sent
+                                        {stats && stats.opens > 0 ? ` · opened ${stats.opens}×` : ''}
                                         {lastSent ? ` · last ${new Date(lastSent).toLocaleDateString()}` : ''}
                                       </p>
                                     )}

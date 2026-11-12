@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { recordLicenseEmails } from '@/lib/licenseEmailLog';
 import {
   sendBatchLicenseActivationEmails,
   sendBatchLicenseClaimEmails,
@@ -325,10 +326,17 @@ export async function POST(request: Request) {
 
     // Persist email tracking for all sent emails
     const allEmailResults = [
-      ...activationResults.results.map((r) => ({ ...r, licenseId: licenseByEmail.get(r.email)?.id })),
-      ...claimResults.results.map((r) => ({ ...r, licenseId: licenseByEmail.get(r.email)?.id })),
-      ...activatedResults.results.map((r) => ({ ...r, licenseId: licenseByEmail.get(r.email)?.id })),
+      ...activationResults.results.map((r) => ({ ...r, kind: 'activation' as const, licenseId: licenseByEmail.get(r.email)?.id })),
+      ...claimResults.results.map((r) => ({ ...r, kind: 'claim' as const, licenseId: licenseByEmail.get(r.email)?.id })),
+      ...activatedResults.results.map((r) => ({ ...r, kind: 'activated' as const, licenseId: licenseByEmail.get(r.email)?.id })),
     ];
+
+    await recordLicenseEmails(
+      adminSupabase,
+      allEmailResults
+        .filter((r) => r.success)
+        .map((r) => ({ messageId: r.messageId, licenseId: r.licenseId, kind: r.kind, recipient: r.email }))
+    );
 
     if (allEmailResults.length > 0) {
       await Promise.all(

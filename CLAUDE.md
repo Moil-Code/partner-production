@@ -25,6 +25,7 @@ The actual env var names used in code differ from `env.example` (which is stale)
 - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY` — anon/publishable key used by browser & middleware (NOT `NEXT_PUBLIC_SUPABASE_ANON_KEY`)
 - `SUPABASE_SECRET_KEY` — service-role key used by `createAdminClient()` (NOT `SUPABASE_SERVICE_ROLE_KEY`)
 - `RESEND_API`, `FROM_EMAIL`
+- `RESEND_WEBHOOK_SECRET` — signing secret (`whsec_…`) of the Resend webhook pointed at `/api/webhooks/resend`; that route returns 503 while it is unset
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 - `NEXT_PUBLIC_VERCEL_ENV` — read by `lib/config.ts` to pick base URL (production vs staging) from `lib/baseUrl.json`
 - `NEXT_PUBLIC_APP_URL` — fallback base URL when not on Vercel
@@ -167,3 +168,36 @@ the existing fleet-wide `(updated_at, id)` index does NOT serve a query with a
 `partner_id` equality in front of the sort, so without it every page either
 scans the whole feed and filters or re-sorts from scratch — correct data, paid
 for once per page, with nothing reporting that it happened.
+
+## Email tracking via Resend webhooks (2026-11)
+
+`licenses.message_id` holds only the LATEST email for a seat (a resend
+overwrites it; reminders never set it) and `email_status` was only refreshed
+when someone pressed a button. `database/add_email_tracking.sql` adds:
+
+- `license_emails` — one row per email sent about a seat (activation, claim,
+  activated, reminder), with delivered/opened/clicked/bounced timestamps and
+  open/click counts. **Every route that emails a licensee must call
+  `recordLicenseEmails()` (`lib/licenseEmailLog.ts`)** with the Resend message
+  id, or that email's events cannot be attributed. It is best-effort: never fail
+  a request over it, the email is already out.
+- `email_events` — raw webhook log, unique on `svix_id` so Resend's retries
+  are counted once.
+- `license_email_stats` — per-seat rollup view (`security_invoker`, so it
+  inherits the caller's licenses RLS). `GET /api/licenses` attaches it as
+  `email_stats` and tolerates the view not existing.
+
+`POST /api/webhooks/resend` is public (allowlisted in `middleware.ts`) and
+verifies the Svix signature itself (`lib/webhookSignature.ts`; resend v4 has no
+helper). All matching/counting happens in the `apply_resend_event` SQL function
+so dedupe and counters are atomic. Events and send rows can arrive in either
+order: `record_license_emails` replays events logged before its row existed.
+
+`email_status` moves FORWARD only (see `email_event_rank`) and only for the
+address the seat is on now, so a late bounce from a pre-correction address
+cannot flag the new one. Anything asking "did the email go out" must use
+`OUTBOUND_EMAIL_STATES` from `lib/emailStatus.ts`, never `= 'sent'` — that
+mistake once stopped reminders for every seat whose email was delivered.
+
+"Opened" needs open tracking enabled on the Resend domain and over-counts Apple
+Mail (it pre-fetches images); clicks and activation are the reliable signals.
