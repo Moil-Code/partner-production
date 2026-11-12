@@ -33,11 +33,25 @@ export async function POST(request: Request) {
 
     const teamId = teamMember?.team_id;
 
+    // `onlyPending`: skip seats that are already activated. Their email has
+    // done its job, and each Resend lookup goes through the 2 req/s queue, so
+    // re-checking them is most of the wait on a large list. Optional so the
+    // partner dashboard's existing call is unchanged.
+    let onlyPending = false;
+    try {
+      const body = await request.json();
+      onlyPending = body?.onlyPending === true;
+    } catch {
+      // No body — the original call shape.
+    }
+
     // Get all licenses with message_ids that need status updates
     let licensesQuery = supabase
       .from('licenses')
       .select('id, message_id')
       .not('message_id', 'is', null);
+
+    if (onlyPending) licensesQuery = licensesQuery.eq('is_activated', false);
 
     if (teamId) {
       licensesQuery = licensesQuery.eq('team_id', teamId);

@@ -5,6 +5,7 @@ import {
   LICENSE_PLANS,
   MAX_MONTHS,
   describePlan,
+  PLAN_DISPLAY_NAMES,
   type LicensePlan,
 } from '@/lib/licensePlanDefaults';
 import { isMoilAdmin } from '@/lib/licenseIssuePolicy';
@@ -240,7 +241,9 @@ export async function POST(request: Request) {
 
     const baseMessage =
       moilResult.status === 'extended'
-        ? `Extended their ${display} add-on.`
+        ? endsOn
+          ? `Extended their ${PLAN_DISPLAY_NAMES[planTier as LicensePlan]} add-on by ${monthsValue} month${monthsValue === 1 ? '' : 's'} — it now ends ${endsOn}.`
+          : `Extended their ${display} add-on.`
         : endsOn
         ? `${display} granted until ${endsOn}.`
         : `${display} granted.`;

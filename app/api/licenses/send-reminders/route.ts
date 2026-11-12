@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/server';
 import { sendLicenseActivationReminderEmail, type EdcEmailInfo } from '@/lib/email';
+import { OUTBOUND_EMAIL_STATES } from '@/lib/emailStatus';
 
 const REMINDER_INTERVAL_DAYS = 15;
 const MAX_REMINDERS = 4;
@@ -76,7 +77,11 @@ async function handle(request: NextRequest) {
     now.getTime() - REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  // Two cohorts of "due" licenses, both unactivated + email_status='sent' + under cap:
+  // Two cohorts of "due" licenses, both unactivated + email went out + under cap.
+  // "Went out" is any outbound state, NOT just 'sent': the email-status sync
+  // rewrites 'sent' to Resend's delivered/opened/clicked, and matching 'sent'
+  // alone dropped exactly the licensees whose email we know arrived. Bounced
+  // and complained stay excluded — reminding a dead or hostile inbox is noise.
   //   1. never reminded, original email sent ≥ 15 days ago
   //   2. last reminder sent ≥ 15 days ago
   const baseSelect =
@@ -86,7 +91,7 @@ async function handle(request: NextRequest) {
     .from('licenses')
     .select(baseSelect)
     .eq('is_activated', false)
-    .eq('email_status', 'sent')
+    .in('email_status', [...OUTBOUND_EMAIL_STATES])
     .is('last_reminder_sent_at', null)
     .lt('reminder_count', MAX_REMINDERS)
     .lte('activation_email_sent_at', cutoffIso)
@@ -96,7 +101,7 @@ async function handle(request: NextRequest) {
     .from('licenses')
     .select(baseSelect)
     .eq('is_activated', false)
-    .eq('email_status', 'sent')
+    .in('email_status', [...OUTBOUND_EMAIL_STATES])
     .lt('reminder_count', MAX_REMINDERS)
     .lte('last_reminder_sent_at', cutoffIso)
     .not('last_reminder_sent_at', 'is', null);
