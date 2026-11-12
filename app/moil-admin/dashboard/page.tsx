@@ -19,6 +19,14 @@ import {
   type BillingCycle,
   type LicensePlan,
 } from '@/lib/licensePlanDefaults';
+import { toCsv, downloadCsv, isoDate } from '@/lib/csv';
+import {
+  emailFunnelStage,
+  licenseEmailStage,
+  licenseEmailsSent,
+  licenseLastEmailAt,
+  type LicenseEmailStats,
+} from '@/lib/emailStatus';
 
 const PLAN_LABELS: Record<LicensePlan, string> = {
   standard: 'Standard',
@@ -49,7 +57,25 @@ import {
   Send,
   Sparkles,
   Undo2,
+  Download,
+  RefreshCw,
+  CalendarPlus,
+  Mail,
 } from 'lucide-react';
+
+// One badge per funnel stage. A stage implies the ones before it, so a
+// licensee who clicked is not shown as merely "delivered".
+const EMAIL_STAGE_BADGE: Record<
+  ReturnType<typeof emailFunnelStage>,
+  { label: string; className: string } | null
+> = {
+  clicked: { label: 'Clicked', className: 'bg-emerald-100 text-emerald-800' },
+  opened: { label: 'Opened', className: 'bg-sky-100 text-sky-800' },
+  delivered: { label: 'Delivered', className: 'bg-slate-100 text-slate-700' },
+  sent: { label: 'Sent', className: 'bg-slate-100 text-slate-600' },
+  undeliverable: { label: 'Bounced', className: 'bg-red-100 text-red-700' },
+  none: null,
+};
 
 interface Partner {
   id: string;
@@ -197,6 +223,111 @@ export default function MoilAdminDashboard() {
     planTier: string;
   } | null>(null);
   const [removingAddon, setRemovingAddon] = React.useState(false);
+
+  // The add-on an admin is extending. Extending re-grants the same tier, which
+  // the Moil backend applies to the live grant instead of issuing a second.
+  const [addonToExtend, setAddonToExtend] = React.useState<{
+    email: string;
+    planTier: LicensePlan;
+    expiresAt: string | null;
+  } | null>(null);
+
+  const [syncingEmailStatus, setSyncingEmailStatus] = React.useState(false);
+
+  // Pull the latest delivered/opened/clicked/bounced state from Resend for
+  // seats that are still pending. Activated seats are skipped: their email
+  // has done its job, and every lookup costs a slot in the 2 req/s queue.
+  const handleSyncEmailStatus = async () => {
+    setSyncingEmailStatus(true);
+    try {
+      const response = await fetch('/api/licenses/email-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ onlyPending: true }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to refresh email status');
+      toast({
+        title: 'Email status refreshed',
+        description: `Checked ${data.synced ?? 0} email${data.synced === 1 ? '' : 's'} with Resend.`,
+        type: 'success',
+      });
+      await fetchLicenses();
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err instanceof Error ? err.message : 'Failed to refresh email status',
+        type: 'error',
+      });
+    } finally {
+      setSyncingEmailStatus(false);
+    }
+  };
+
+  const exportStamp = () => new Date().toISOString().split('T')[0];
+
+  // Exports what this tab shows, from what is already loaded — no second
+  // query that could disagree with the table on screen.
+  const handleExportLicenses = () => {
+    const headers = [
+      'Email',
+      'Business Name',
+      'Status',
+      'Plan Tier',
+      'Billing Cycle',
+      'Expires',
+      'Created',
+      'Activated',
+      'Email Stage',
+      'Emails Sent',
+      'Last Email Sent',
+      'Opens',
+      'First Opened',
+      'Clicks',
+      'First Clicked',
+      'Bounce / Complaint',
+    ];
+    const rows = licenses.map((l) => [
+      l.email,
+      l.business_name || '',
+      l.is_activated ? 'Activated' : 'Pending',
+      l.plan_tier || '',
+      l.billing_cycle || '',
+      isoDate(l.expires_at),
+      isoDate(l.created_at),
+      isoDate(l.activated_at),
+      licenseEmailStage(l) === 'none' ? '' : licenseEmailStage(l),
+      licenseEmailsSent(l),
+      isoDate(licenseLastEmailAt(l)),
+      // Blank, not 0, when there is no webhook data: "never opened" and
+      // "we cannot know" must not look the same in a spreadsheet.
+      l.email_stats ? l.email_stats.opens : '',
+      isoDate(l.email_stats?.first_opened_at),
+      l.email_stats ? l.email_stats.clicks : '',
+      isoDate(l.email_stats?.first_clicked_at),
+      l.email_stats?.complained_at
+        ? 'Marked as spam'
+        : l.email_stats?.bounced_at
+        ? l.email_stats.bounce_reason || 'Bounced'
+        : '',
+    ]);
+    downloadCsv(`moil-licenses-${exportStamp()}.csv`, toCsv(headers, rows));
+  };
+
+  const handleExportAddons = () => {
+    const headers = ['Email', 'Add-on', 'State', 'Starts', 'Ends', 'Partner', 'Base Plan', 'Base Billing Cycle'];
+    const rows = addons.map((a) => [
+      a.email,
+      a.planTier,
+      a.state ?? (a.active ? 'active' : 'expired'),
+      isoDate(a.startsAt),
+      isoDate(a.expiresAt),
+      a.partnerName || 'Moil',
+      a.basePlan?.planTier || '',
+      a.basePlan?.billingCycle || '',
+    ]);
+    downloadCsv(`moil-addons-${exportStamp()}.csv`, toCsv(headers, rows));
+  };
 
   const handleRemoveAddon = async () => {
     if (!addonToRemove) return;
@@ -1285,6 +1416,15 @@ export default function MoilAdminDashboard() {
                     someone is on, an add-on sits on top of it for N months
                     and then expires by itself.
                   */}
+                  <Button
+                    variant="outline"
+                    onClick={handleExportLicenses}
+                    disabled={licensesLoading || licenses.length === 0}
+                    title="Download the licenses below as a CSV"
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Export
+                  </Button>
                   <Button variant="outline" onClick={() => setShowGrantAddonModal(true)}>
                     <Sparkles className="w-4 h-4 mr-2" />
                     Grant Add-on
@@ -1312,11 +1452,20 @@ export default function MoilAdminDashboard() {
                 <div className="mb-6 rounded-xl border border-violet-200 bg-violet-50/50 p-4">
                   <div className="flex items-center gap-2 mb-3">
                     <Sparkles className="w-4 h-4 text-violet-700" />
-                    <h3 className="font-semibold text-[var(--text-primary)]">
+                    <h3 className="flex-1 font-semibold text-[var(--text-primary)]">
                       Granted add-ons ({addons.filter((a) => (a.state ?? (a.active ? 'active' : 'expired')) === 'active').length} active
                       {addons.filter((a) => a.state === 'scheduled').length > 0 &&
                         `, ${addons.filter((a) => a.state === 'scheduled').length} scheduled`})
                     </h3>
+                    <button
+                      type="button"
+                      onClick={handleExportAddons}
+                      className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-violet-800 transition-colors hover:bg-violet-100"
+                      title="Download these add-ons as a CSV"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Export
+                    </button>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
@@ -1366,6 +1515,27 @@ export default function MoilAdminDashboard() {
                               {/* Only a live or scheduled add-on can be removed;
                                   an ended one has nothing left to roll back. */}
                               {(a.state ?? (a.active ? 'active' : 'expired')) !== 'expired' && (
+                                <div className="inline-flex items-center gap-2">
+                                {/* Extend only a live/scheduled grant: an ended
+                                    one has nothing to extend, and re-granting
+                                    it would start a fresh window from today. */}
+                                {LICENSE_PLANS.includes(a.planTier as LicensePlan) && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setAddonToExtend({
+                                        email: a.email,
+                                        planTier: a.planTier as LicensePlan,
+                                        expiresAt: a.expiresAt,
+                                      })
+                                    }
+                                    className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-50"
+                                    title="Add more months to this add-on"
+                                  >
+                                    <CalendarPlus className="h-3.5 w-3.5" />
+                                    Extend
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -1377,6 +1547,7 @@ export default function MoilAdminDashboard() {
                                   <Undo2 className="h-3.5 w-3.5" />
                                   Remove add-on
                                 </button>
+                                </div>
                               )}
                             </td>
                           </tr>
@@ -1394,6 +1565,60 @@ export default function MoilAdminDashboard() {
                 </div>
               ) : (
                 <>
+                  {/*
+                    Activation-email funnel for the seats listed below. Stages
+                    are cumulative (clicked ⊂ opened ⊂ delivered ⊂ sent).
+                    "Opened" depends on Resend open tracking being enabled for
+                    the sending domain and over-counts Apple Mail (which
+                    pre-fetches images), so "Clicked" and "Activated" are the
+                    numbers to trust.
+                  */}
+                  {licenses.length > 0 && (() => {
+                    const pending = licenses.filter((l) => !l.is_activated);
+                    const stages = licenses.map((l) => licenseEmailStage(l));
+                    const atLeast = (...ok: string[]) => stages.filter((st) => ok.includes(st)).length;
+                    const sentTotal = licenses.reduce((n, l) => n + licenseEmailsSent(l), 0);
+                    const tiles = [
+                      { label: 'Emails sent', value: sentTotal, hint: 'activation + reminders' },
+                      { label: 'Delivered', value: atLeast('delivered', 'opened', 'clicked') },
+                      { label: 'Opened', value: atLeast('opened', 'clicked') },
+                      { label: 'Clicked', value: atLeast('clicked') },
+                      { label: 'Bounced', value: atLeast('undeliverable'), danger: true },
+                      { label: 'Activated', value: licenses.length - pending.length, hint: `of ${licenses.length}` },
+                    ];
+                    return (
+                      <div className="mb-6 rounded-xl border border-[var(--border)] p-4">
+                        <div className="flex items-center gap-2 mb-3">
+                          <Mail className="w-4 h-4 text-[var(--text-secondary)]" />
+                          <h3 className="flex-1 font-semibold text-[var(--text-primary)]">Activation emails</h3>
+                          <button
+                            type="button"
+                            onClick={handleSyncEmailStatus}
+                            disabled={syncingEmailStatus || pending.length === 0}
+                            className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-subtle)] disabled:opacity-50"
+                            title="Events arrive automatically via the Resend webhook. This re-asks Resend for pending seats — useful for mail sent before the webhook was set up."
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${syncingEmailStatus ? 'animate-spin' : ''}`} />
+                            {syncingEmailStatus ? 'Checking…' : 'Refresh status'}
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                          {tiles.map((t) => (
+                            <div key={t.label} className="rounded-lg bg-[var(--surface-subtle)] px-3 py-2">
+                              <p className="text-xs text-[var(--text-tertiary)]">{t.label}</p>
+                              <p className={`text-lg font-semibold ${t.danger && t.value > 0 ? 'text-red-600' : 'text-[var(--text-primary)]'}`}>
+                                {t.value}
+                                {t.hint && (
+                                  <span className="ml-1 text-xs font-normal text-[var(--text-tertiary)]">{t.hint}</span>
+                                )}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Licenses Table */}
                   <div className="overflow-x-auto">
                     <table className="w-full">
@@ -1404,6 +1629,7 @@ export default function MoilAdminDashboard() {
                           <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Status</th>
                           <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Created</th>
                           <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Activated</th>
+                          <th className="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Email activity</th>
                           <th className="text-right py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Actions</th>
                         </tr>
                       </thead>
@@ -1474,6 +1700,47 @@ export default function MoilAdminDashboard() {
                             </td>
                             <td className="py-4 px-4 text-[var(--text-secondary)] text-sm">
                               {license.activated_at ? new Date(license.activated_at).toLocaleDateString() : '-'}
+                            </td>
+                            <td className="py-4 px-4 text-sm">
+                              {(() => {
+                                const stats = license.email_stats as LicenseEmailStats | null;
+                                const badge = EMAIL_STAGE_BADGE[licenseEmailStage(license)];
+                                const sent = licenseEmailsSent(license);
+                                const lastSent = licenseLastEmailAt(license);
+                                if (!badge && sent === 0) {
+                                  return <span className="text-[var(--text-tertiary)]">-</span>;
+                                }
+                                return (
+                                  <div>
+                                    {badge && (
+                                      <span
+                                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${badge.className}`}
+                                        title={
+                                          stats?.complained_at
+                                            ? 'They marked an email as spam'
+                                            : stats?.bounce_reason || undefined
+                                        }
+                                      >
+                                        {stats?.complained_at ? 'Spam' : badge.label}
+                                      </span>
+                                    )}
+                                    {sent > 0 && (
+                                      <p
+                                        className="mt-1 text-xs text-[var(--text-tertiary)]"
+                                        title={
+                                          stats
+                                            ? 'Every email sent about this seat: activation, resends and reminders'
+                                            : 'Activation email plus automatic reminders since the last manual resend'
+                                        }
+                                      >
+                                        {sent} sent
+                                        {stats && stats.opens > 0 ? ` · opened ${stats.opens}×` : ''}
+                                        {lastSent ? ` · last ${new Date(lastSent).toLocaleDateString()}` : ''}
+                                      </p>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </td>
                             <td className="py-4 px-4 text-right">
                               {license.is_activated ? (
@@ -1673,6 +1940,15 @@ export default function MoilAdminDashboard() {
       <GrantAddonModal
         isOpen={showGrantAddonModal}
         onClose={() => setShowGrantAddonModal(false)}
+        onGranted={fetchAddons}
+      />
+
+      <GrantAddonModal
+        isOpen={!!addonToExtend}
+        onClose={() => setAddonToExtend(null)}
+        email={addonToExtend?.email}
+        planTier={addonToExtend?.planTier}
+        currentExpiresAt={addonToExtend?.expiresAt}
         onGranted={fetchAddons}
       />
 

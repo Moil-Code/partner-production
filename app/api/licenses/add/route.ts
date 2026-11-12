@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { recordLicenseEmails } from '@/lib/licenseEmailLog';
 import {
   sendLicenseActivationEmail,
   sendLicenseClaimEmail,
@@ -351,6 +352,7 @@ export async function POST(request: Request) {
 
     let emailStatus = 'pending';
     let messageId: string | undefined;
+    let emailKind: 'activation' | 'claim' | 'activated' = 'activation';
 
     if (status === 'activated') {
       // User had a profile — plan was applied directly. Send "your license is active" email.
@@ -359,6 +361,7 @@ export async function POST(request: Request) {
         .update({ is_activated: true, email_status: 'skipped', activated_at: new Date().toISOString() })
         .eq('id', license.id);
 
+      emailKind = 'activated';
       const r = await sendLicenseActivatedEmail({
         email: license.email,
         loginUrl,
@@ -371,6 +374,7 @@ export async function POST(request: Request) {
 
     } else if (status === 'pending_invite' && moilResult?.has_account === true) {
       // User exists on Moil but has no employer profile yet. Send "create your profile" email.
+      emailKind = 'claim';
       const r = await sendLicenseClaimEmail({
         email: license.email,
         loginUrl,
@@ -409,6 +413,10 @@ export async function POST(request: Request) {
         ...(messageId ? { message_id: messageId } : {}),
       })
       .eq('id', license.id);
+
+    await recordLicenseEmails(adminSupabase, [
+      { messageId, licenseId: license.id, kind: emailKind, recipient: license.email },
+    ]);
 
     if (teamMember?.team_id) {
       await supabase.rpc('log_activity', {

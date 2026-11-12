@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { sendLicenseActivationEmail, type EdcEmailInfo } from '@/lib/email';
+import { recordLicenseEmails } from '@/lib/licenseEmailLog';
 import {
   resolveLicenseActor,
   loadManageableLicense,
@@ -143,6 +144,12 @@ export async function POST(request: Request) {
 
     // Update message_id and email_status based on result
     if (emailResult.success && emailResult.messageId) {
+      // Logged separately because the update below OVERWRITES message_id —
+      // without this row, opens of the previous email would have nowhere to go.
+      await recordLicenseEmails(createAdminClient(), [
+        { messageId: emailResult.messageId, licenseId: license.id, kind: 'activation', recipient: license.email },
+      ]);
+
       const { count } = await supabase
         .from('licenses')
         .update(

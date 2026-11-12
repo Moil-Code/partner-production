@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
+import { recordLicenseEmails } from '@/lib/licenseEmailLog';
 import { sendBatchLicenseActivationEmails } from '@/lib/email';
 import {
   parsePlanKey,
@@ -288,6 +289,13 @@ export async function POST(request: Request) {
       adminEmail: admin.email,
       edc: edcInfo,
     }) : { results: [], sent: 0, failed: 0 };
+
+    await recordLicenseEmails(
+      adminSupabase,
+      (emailResults.results || [])
+        .filter((r) => r.success)
+        .map((r) => ({ messageId: r.messageId, licenseId: r.licenseId, kind: 'activation' as const, recipient: r.email }))
+    );
 
     // Update message_id and email_status for each license based on results
     if (emailResults.results && Array.isArray(emailResults.results) && emailResults.results.length > 0) {

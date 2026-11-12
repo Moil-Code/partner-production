@@ -16,6 +16,14 @@ interface GrantAddonModalProps {
   onClose: () => void;
   /** Pre-filled and locked when opened from a specific licensee's row. */
   email?: string;
+  /**
+   * Pre-filled and locked together with `email` to EXTEND an add-on that is
+   * already in force. The Moil backend extends a live grant of the same tier
+   * instead of issuing a second one, so extending is a re-grant of that tier.
+   */
+  planTier?: LicensePlan;
+  /** The current end date, shown so the operator knows what they are moving. */
+  currentExpiresAt?: string | null;
   onGranted?: () => void | Promise<void>;
 }
 
@@ -35,11 +43,14 @@ export function GrantAddonModal({
   isOpen,
   onClose,
   email: lockedEmail,
+  planTier: lockedPlanTier,
+  currentExpiresAt,
   onGranted,
 }: GrantAddonModalProps) {
+  const isExtend = !!lockedEmail && !!lockedPlanTier;
   const { toast } = useToast();
   const [email, setEmail] = useState(lockedEmail || '');
-  const [planTier, setPlanTier] = useState<LicensePlan>('market_pro');
+  const [planTier, setPlanTier] = useState<LicensePlan>(lockedPlanTier || 'market_pro');
   const [months, setMonths] = useState('1');
   const [note, setNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -50,12 +61,12 @@ export function GrantAddonModal({
   React.useEffect(() => {
     if (isOpen) {
       setEmail(lockedEmail || '');
-      setPlanTier('market_pro');
+      setPlanTier(lockedPlanTier || 'market_pro');
       setMonths('1');
       setNote('');
       setNotEligible(null);
     }
-  }, [isOpen, lockedEmail]);
+  }, [isOpen, lockedEmail, lockedPlanTier]);
 
   if (!isOpen) return null;
 
@@ -92,7 +103,7 @@ export function GrantAddonModal({
           setNotEligible(data.error || 'This person cannot receive an add-on.');
           return;
         }
-        throw new Error(data.error || 'Failed to grant add-on');
+        throw new Error(data.error || (isExtend ? 'Failed to extend add-on' : 'Failed to grant add-on'));
       }
 
       toast({
@@ -103,8 +114,8 @@ export function GrantAddonModal({
         // so it is shown as a warning that says what to expect.
         title:
           data.creditSync === 'failed'
-            ? 'Add-on granted — credits still pending'
-            : 'Add-on granted',
+            ? `Add-on ${data.extended ? 'extended' : 'granted'} — credits still pending`
+            : `Add-on ${data.extended ? 'extended' : 'granted'}`,
         description:
           // `mirrored: false` means the grant IS live on Moil but this
           // dashboard has not recorded it. Saying so beats a clean success
@@ -137,7 +148,7 @@ export function GrantAddonModal({
               <Sparkles className="w-5 h-5" />
             </div>
             <h2 className="text-xl font-semibold text-[var(--text-primary)]">
-              Grant plan add-on
+              {isExtend ? 'Extend add-on' : 'Grant plan add-on'}
             </h2>
           </div>
           <button
@@ -150,6 +161,21 @@ export function GrantAddonModal({
           </button>
         </div>
 
+        {isExtend ? (
+          <p className="text-sm text-[var(--text-secondary)] mb-5">
+            Adds more time to {lockedEmail}&apos;s{' '}
+            <strong className="font-medium text-[var(--text-primary)]">
+              {PLAN_DISPLAY_NAMES[lockedPlanTier!]}
+            </strong>{' '}
+            add-on
+            {currentExpiresAt
+              ? `, which currently ends ${new Date(currentExpiresAt).toLocaleDateString()}`
+              : ''}
+            . The existing grant is extended — no second add-on is created — and
+            their own license keeps running underneath. The new end date is
+            shown once Moil confirms it.
+          </p>
+        ) : (
         <p className="text-sm text-[var(--text-secondary)] mb-5">
           Gives this person a higher tier for a set number of months.{' '}
           <strong className="font-medium text-[var(--text-primary)]">
@@ -165,6 +191,7 @@ export function GrantAddonModal({
           an active plan, use <em>Add License</em> instead. No seat is used,
           and the partner does not see this.
         </p>
+        )}
 
         {notEligible && (
           <div
@@ -198,7 +225,8 @@ export function GrantAddonModal({
             <select
               value={planTier}
               onChange={(e) => setPlanTier(e.target.value as LicensePlan)}
-              className="w-full px-4 py-2.5 border border-[var(--border)] rounded-xl bg-[var(--surface)] text-[var(--text-primary)] focus:border-[var(--primary)] focus:outline-none"
+              disabled={isExtend}
+              className="w-full disabled:bg-[var(--surface-subtle)] disabled:cursor-not-allowed px-4 py-2.5 border border-[var(--border)] rounded-xl bg-[var(--surface)] text-[var(--text-primary)] focus:border-[var(--primary)] focus:outline-none"
             >
               {LICENSE_PLANS.map((p) => (
                 <option key={p} value={p}>
@@ -210,7 +238,7 @@ export function GrantAddonModal({
 
           <div>
             <label className="block text-sm font-medium text-[var(--text-secondary)] mb-1.5">
-              For how many months? (1–{MAX_MONTHS}) *
+              {isExtend ? 'Add how many months?' : 'For how many months?'} (1–{MAX_MONTHS}) *
             </label>
             <input
               type="number"
@@ -238,7 +266,7 @@ export function GrantAddonModal({
               onChange={(e) => setNote(e.target.value)}
               maxLength={500}
               className="w-full px-4 py-2.5 border border-[var(--border)] rounded-xl bg-[var(--surface)] text-[var(--text-primary)] focus:border-[var(--primary)] focus:outline-none"
-              placeholder="Why this was granted"
+              placeholder={isExtend ? 'Why this was extended' : 'Why this was granted'}
             />
           </div>
 
@@ -259,7 +287,9 @@ export function GrantAddonModal({
               loading={submitting}
               className="flex-1"
             >
-              {submitting ? 'Granting...' : 'Grant add-on'}
+              {submitting
+                ? isExtend ? 'Extending...' : 'Granting...'
+                : isExtend ? 'Extend add-on' : 'Grant add-on'}
             </Button>
           </div>
         </form>
