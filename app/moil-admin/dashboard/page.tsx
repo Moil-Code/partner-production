@@ -346,6 +346,89 @@ export default function MoilAdminDashboard() {
       )
     : addons;
 
+  // ── Bulk resend ─────────────────────────────────────────────────────
+  // Targets the pending seats the filters currently show, so "everyone
+  // pending" is the unfiltered default and "pending, not opened" is one
+  // dropdown away. The server re-checks every rule below; this copy only
+  // makes the count on the button honest.
+  const BULK_RESEND_GAP_MS = 24 * 60 * 60 * 1000;
+  const BULK_RESEND_CHUNK = 25; // = MAX_PER_REQUEST in /api/licenses/resend-bulk
+  const bulkPending = filteredLicenses.filter((l) => !l.is_activated);
+  const bulkBounced = bulkPending.filter((l) => licenseEmailStage(l) === 'undeliverable');
+  const bulkRecent = bulkPending.filter((l) => {
+    if (licenseEmailStage(l) === 'undeliverable') return false;
+    const last = licenseLastEmailAt(l);
+    return !!last && Date.now() - new Date(last).getTime() < BULK_RESEND_GAP_MS;
+  });
+  const bulkEligible = bulkPending.filter(
+    (l) => !bulkBounced.includes(l) && !bulkRecent.includes(l)
+  );
+
+  const [showBulkResendConfirm, setShowBulkResendConfirm] = React.useState(false);
+  const [bulkResend, setBulkResend] = React.useState<{
+    done: number;
+    total: number;
+    sent: number;
+    skipped: number;
+    failed: number;
+  } | null>(null);
+  // Checked between chunks: Stop finishes the chunk in flight (those emails
+  // are already queued server-side) and sends no more.
+  const bulkResendStopRef = React.useRef(false);
+
+  const handleBulkResend = async () => {
+    const ids: string[] = bulkEligible.map((l) => l.id);
+    setShowBulkResendConfirm(false);
+    if (ids.length === 0) return;
+
+    bulkResendStopRef.current = false;
+    const tally = { done: 0, total: ids.length, sent: 0, skipped: 0, failed: 0 };
+    setBulkResend({ ...tally });
+    let error: string | null = null;
+
+    // Chunked so each request finishes well inside the function time limit
+    // (the email queue sends 2/s) and progress is real, not a spinner.
+    for (let i = 0; i < ids.length; i += BULK_RESEND_CHUNK) {
+      if (bulkResendStopRef.current) break;
+      const chunk = ids.slice(i, i + BULK_RESEND_CHUNK);
+      try {
+        const response = await fetch('/api/licenses/resend-bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ licenseIds: chunk }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Bulk resend failed');
+        tally.sent += data.sent ?? 0;
+        tally.skipped += data.skipped ?? 0;
+        tally.failed += data.failed ?? 0;
+      } catch (err) {
+        // Stop on a request-level failure (auth, network): the remaining
+        // chunks would fail the same way, and the count so far stays true.
+        error = err instanceof Error ? err.message : 'Bulk resend failed';
+        tally.failed += chunk.length;
+        tally.done += chunk.length;
+        setBulkResend({ ...tally });
+        break;
+      }
+      tally.done += chunk.length;
+      setBulkResend({ ...tally });
+    }
+
+    const stopped = bulkResendStopRef.current && tally.done < tally.total;
+    const parts = [`${tally.sent} sent`];
+    if (tally.skipped) parts.push(`${tally.skipped} skipped`);
+    if (tally.failed) parts.push(`${tally.failed} failed`);
+    if (stopped) parts.push(`${tally.total - tally.done} not attempted`);
+    toast({
+      title: error ? 'Bulk resend interrupted' : stopped ? 'Bulk resend stopped' : 'Activation emails resent',
+      description: error ? `${parts.join(' · ')}. ${error}` : parts.join(' · '),
+      type: error || tally.failed ? 'warning' : 'success',
+    });
+    setBulkResend(null);
+    fetchLicenses();
+  };
+
   const exportStamp = () => new Date().toISOString().split('T')[0];
 
   // Exports what this tab shows, from what is already loaded — no second
@@ -1789,10 +1872,40 @@ export default function MoilAdminDashboard() {
                               <span className="ml-2 text-xs font-normal text-[var(--text-tertiary)]">filtered</span>
                             )}
                           </h3>
+                          {bulkResend ? (
+                            <span className="inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                              <Spinner size="sm" className="w-3.5 h-3.5" />
+                              Sending {bulkResend.done} of {bulkResend.total}…
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  bulkResendStopRef.current = true;
+                                }}
+                                className="font-medium text-red-600 hover:underline"
+                              >
+                                Stop
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setShowBulkResendConfirm(true)}
+                              disabled={bulkEligible.length === 0}
+                              className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs font-medium text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/10 disabled:opacity-50 disabled:text-[var(--text-tertiary)]"
+                              title={
+                                bulkEligible.length === 0
+                                  ? 'No pending seats to email: everyone shown is activated, bounced, or was emailed in the last 24 hours'
+                                  : 'Send the activation email again to every pending seat shown'
+                              }
+                            >
+                              <Send className="h-3.5 w-3.5" />
+                              Resend to {bulkEligible.length} pending
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={handleSyncEmailStatus}
-                            disabled={syncingEmailStatus || pending.length === 0}
+                            disabled={syncingEmailStatus || !!bulkResend || pending.length === 0}
                             className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-subtle)] disabled:opacity-50"
                             title="Events arrive automatically via the Resend webhook. This re-asks Resend for pending seats — useful for mail sent before the webhook was set up."
                           >
@@ -2189,6 +2302,29 @@ export default function MoilAdminDashboard() {
         confirmText="Upgrade"
         variant="warning"
         isLoading={addingLicense}
+      />
+
+      <ConfirmationModal
+        isOpen={showBulkResendConfirm}
+        onClose={() => setShowBulkResendConfirm(false)}
+        onConfirm={handleBulkResend}
+        variant="warning"
+        title={`Resend the activation email to ${bulkEligible.length} ${bulkEligible.length === 1 ? 'person' : 'people'}?`}
+        description={[
+          `Everyone ${licenseFiltersActive ? 'pending in the current filter' : 'still pending'} gets the activation email again, and their automatic reminder schedule restarts from today.`,
+          bulkBounced.length
+            ? `${bulkBounced.length} whose email bounced or was marked as spam will be skipped.`
+            : '',
+          bulkRecent.length
+            ? `${bulkRecent.length} emailed in the last 24 hours will be skipped.`
+            : '',
+          bulkEligible.length > 50
+            ? `This takes about ${Math.ceil(bulkEligible.length / 2 / 60)} min; keep this tab open.`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        confirmText={`Send ${bulkEligible.length} ${bulkEligible.length === 1 ? 'email' : 'emails'}`}
       />
 
       <ConfirmationModal
