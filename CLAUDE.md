@@ -29,7 +29,10 @@ The actual env var names used in code differ from `env.example` (which is stale)
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`
 - `NEXT_PUBLIC_VERCEL_ENV` — read by `lib/config.ts` to pick base URL (production vs staging) from `lib/baseUrl.json`
 - `NEXT_PUBLIC_APP_URL` — fallback base URL when not on Vercel
-- `NEXT_PUBLIC_QC_API_KEY`, `NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION` — keys used by external integrations
+- `MOIL_PARTNER_API_KEY` — SERVER-ONLY key for the main API's partner endpoints (buy-licenses, activate_license, add-ons). Read only through `lib/moilApi.ts`, never from client code. `NEXT_PUBLIC_QC_API_KEY` is the old name, read by `lib/moilApi.ts` as a server-side fallback during the transition (it logs a warning); remove it once the new one is set and the key rotated, because any `NEXT_PUBLIC_*` value is compiled into the browser bundle
+- `MOIL_API_URL` — main API base URL for server code (falls back to `NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION`)
+- `INTERNAL_API_KEY` or `MOIL_INTERNAL_API_KEY` — shared secret the main API sends as `x-internal-api-key` (`lib/internalApiKey.ts`); required by `/activate`, `/purchase/fulfill`, `/addon`, `/backfill`, `/assignments`, `/reconcile`, `/partners/directory`
+- `CRON_SECRET` — Bearer secret for `/api/licenses/send-reminders`
 
 ## Architecture
 
@@ -54,7 +57,7 @@ RLS policies depend on `SECURITY DEFINER` helper functions (`get_user_global_rol
 
 ### Auth & route protection
 
-`middleware.ts` runs `supabase.auth.getUser()` on every non-static request and redirects unauthenticated users to `/login`. The allowlist of public paths is hardcoded there: `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/payment`, plus these public API prefixes: `/api/health`, `/api/licenses/verify`, `/api/licenses/activate`, `/api/licenses/purchase`, `/api/signup/*`, `/api/partners/approve`, `/api/partners/grant-access`, `/api/partners/branding/*`. **If you add a new public-facing route, also add it to the middleware allowlist** — otherwise it will redirect to `/login`.
+`middleware.ts` runs `supabase.auth.getUser()` on every non-static request and redirects unauthenticated users to `/login`. The allowlist of public paths is hardcoded there: `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/payment`, plus these public API prefixes: `/api/health`, `/api/licenses/verify`, `/api/licenses/activate` (internal key), `/api/licenses/purchase/fulfill` (internal key), `/api/signup/*`, `/api/partners/approve`, `/api/partners/grant-access`, `/api/partners/branding/*`. **If you add a new public-facing route, also add it to the middleware allowlist** — otherwise it will redirect to `/login`.
 
 The Supabase docs warning in `middleware.ts` is real: don't insert logic between `createServerClient` and `getUser()`, and always return the `supabaseResponse` object so cookies stay in sync.
 
@@ -64,7 +67,7 @@ The Supabase docs warning in `middleware.ts` is real: don't insert logic between
 - `app/admin/*` — partner-admin dashboard (license management, branding, settings)
 - `app/moil-admin/*` — Moil-internal super-admin (manage partners, teams, all licenses)
 - `app/activate` (legacy) and `app/invite`, `app/grant-access`, `app/payment` — public landing flows hit from email links / payment redirects
-- `app/api/licenses/*` — license CRUD + CSV import/export + the three external public endpoints (`verify`, `activate`, `purchase`) documented in `EXTERNAL_API_DOCS.md`
+- `app/api/licenses/*` — license CRUD + CSV import/export + the external endpoints (`verify`, `activate`, `purchase/fulfill`) documented in `EXTERNAL_API_DOCS.md`
 - `app/api/partners/*` — partner CRUD, branding, approval, access-request flows
 - `app/api/team*`, `app/api/teams/*` — team membership and invitations
 - `app/api/upload` — Cloudinary signed uploads for logos
@@ -201,3 +204,23 @@ mistake once stopped reminders for every seat whose email was delivered.
 
 "Opened" needs open tracking enabled on the Resend domain and over-counts Apple
 Mail (it pre-fetches images); clicks and activation are the reliable signals.
+
+## Seat purchases are fulfilled by the Stripe webhook (2026-11-20)
+
+Seats used to be added from the browser redirect's query string (anyone could
+type `/api/licenses/purchase?licenseCount=500&payment=successful...`) and by a
+public POST that took any team id; and the dashboard called the main API with
+a `NEXT_PUBLIC_*` key, which shipped that key to every browser. Now:
+
+- the dashboard calls `POST /api/licenses/checkout`; the server resolves admin
+  and team from the session and calls the main API with `MOIL_PARTNER_API_KEY`
+  (`lib/moilApi.ts`, server only);
+- the main API's Stripe webhook calls `POST /api/licenses/purchase/fulfill`
+  (internal key), which runs ONE SQL function, `fulfill_license_purchase`, keyed
+  by the Stripe session id (`database/add_license_purchase_fulfillment.sql`);
+- `GET /api/licenses/purchase` only redirects to `?purchase=processing`.
+
+`/api/licenses/activate` requires the internal key too, and its flip is
+conditioned on `is_activated = false` so a concurrent call cannot count twice.
+The reminder cron claims each seat (compare-and-set) before sending, and first
+licence emails carry a Resend idempotency key; manual resends never do.

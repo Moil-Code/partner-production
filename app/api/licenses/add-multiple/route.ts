@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { moilApiUrl, moilPartnerApiKey } from '@/lib/moilApi';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { recordLicenseEmails } from '@/lib/licenseEmailLog';
 import {
@@ -198,14 +199,16 @@ export async function POST(request: Request) {
     const moilResultByEmail = new Map<string, MoilResult>();
 
     try {
-      if (process.env.NEXT_PUBLIC_QC_API_KEY && newEmails.length > 0) {
+      const moilKey = moilPartnerApiKey();
+      const moilUrl = moilApiUrl();
+      if (moilKey && moilUrl && newEmails.length > 0) {
         const resp = await fetch(
-          `${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/activate_license`,
+          `${moilUrl}/api/employer/activate_license`,
           {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
+              'x-api-key': moilKey,
             },
             body: JSON.stringify({
               emails: newEmails.map((email) => ({

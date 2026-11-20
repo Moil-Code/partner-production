@@ -95,12 +95,16 @@ POST /api/licenses/activate
 
 ### Authentication
 
-**None required** - This is a public endpoint, called by the Moil backend.
+**Required** (since 2026-11-20). Send the shared secret as `x-internal-api-key`
+(`INTERNAL_API_KEY` / `MOIL_INTERNAL_API_KEY`). Missing or wrong key: **401**;
+key not configured on the partner app: **503**. A license id is not a
+capability: ids travel in activation links.
 
 ### Request Headers
 
 ```
 Content-Type: application/json
+x-internal-api-key: <MOIL_INTERNAL_API_KEY>
 ```
 
 ### Request Body
@@ -190,104 +194,50 @@ curl -X POST "https://your-domain.com/api/licenses/activate" \
 
 ---
 
-## 3. Purchase Licenses
+## 3. Purchase Licenses (Stripe fulfilment)
 
-Update the purchased license count for a **team**. This endpoint is typically called after a successful payment to add licenses. License counts are stored at the team level — the endpoint accepts either a `teamId` directly, or an `adminId` (in which case the admin's team is resolved).
+Seats are added only after Stripe confirms payment (since 2026-11-20). The old
+public `POST /api/licenses/purchase` (add seats to any team, no auth) is
+**removed**, and the browser redirect `GET /api/licenses/purchase` no longer
+changes anything: it only sends the person to `/admin/dashboard?purchase=processing`.
 
-The route also exposes a `GET` handler used by the Stripe payment redirect flow (`?licenseCount=&payment=successful&paymentType=license_purchase`); that variant requires an authenticated browser session and redirects to the dashboard.
+Flow:
+
+1. The dashboard calls `POST /api/licenses/checkout` `{ count }` (signed-in
+   admin). The server resolves the admin and team from the session and calls the
+   main API's `POST /api/stripe/buy-licenses` with the server-only partner key,
+   sending `partnerAdminId` / `partnerTeamId`. It answers the main API's
+   `{ success, data: { url } }`.
+2. The main API's Stripe webhook, on a paid `license_purchase` session, calls:
 
 ### Endpoint
 
 ```
-POST /api/licenses/purchase
+POST /api/licenses/purchase/fulfill
 ```
 
 ### Authentication
 
-**None required** - This is a public endpoint (should be called from trusted payment provider).
-
-### Request Headers
-
-```
-Content-Type: application/json
-```
+**Required.** `x-internal-api-key: <MOIL_INTERNAL_API_KEY>`. 503 when unset, 401 when wrong.
 
 ### Request Body
 
-| Field          | Type           | Required | Description                              |
-|----------------|----------------|----------|------------------------------------------|
-| `teamId`       | string         | Yes*     | The UUID of the team to credit           |
-| `adminId`      | string         | Yes*     | The UUID of an admin account — used to resolve the team when `teamId` is not sent |
-| `licenseCount` | number/string  | Yes      | Number of licenses to add (must be >= 1) |
+| Field          | Type         | Required | Description                         |
+|----------------|--------------|----------|-------------------------------------|
+| `sessionId`    | string       | Yes      | Stripe Checkout session id          |
+| `adminId`      | uuid         | Yes      | Admin who started the checkout      |
+| `teamId`       | uuid \| null | Yes      | Team to credit; null credits the admin |
+| `licenseCount` | integer      | Yes      | 1..10000                            |
 
-\* At least one of `teamId` or `adminId` is required. When both are sent, `teamId` wins.
+### Responses
 
-### Example Request
+- `200 { "applied": true }` seats added.
+- `200 { "applied": false, "reason": "already_fulfilled" }` a redelivery; nothing added.
+- `400` invalid body, `404` team/admin not found: permanent, do not retry.
+- `401`, `503`, `5xx`: retry.
 
-```bash
-curl -X POST "https://your-domain.com/api/licenses/purchase" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "adminId": "123e4567-e89b-12d3-a456-426614174000",
-    "licenseCount": 10
-  }'
-```
-
-### Success Response
-
-**Status Code:** `200 OK`
-
-```json
-{
-  "success": true,
-  "message": "Team license count updated successfully",
-  "team_id": "9f8e7d6c-5b4a-3210-fedc-ba9876543210",
-  "licenses_added": 10,
-  "total_licenses": 25
-}
-```
-
-### Error Responses
-
-**Status Code:** `400 Bad Request` - Missing required fields
-
-```json
-{
-  "error": "Missing required parameters: (adminId or teamId) and licenseCount"
-}
-```
-
-**Status Code:** `400 Bad Request` - Invalid license count
-
-```json
-{
-  "error": "Invalid license count"
-}
-```
-
-**Status Code:** `404 Not Found` - Admin is not in a team (when resolving via `adminId`)
-
-```json
-{
-  "error": "Admin is not in a team"
-}
-```
-
-**Status Code:** `404 Not Found` - Team not found
-
-```json
-{
-  "error": "Team not found"
-}
-```
-
-**Status Code:** `500 Internal Server Error`
-
-```json
-{
-  "error": "Failed to update license count"
-}
-```
+Idempotent by Stripe session id (`license_purchases`, function
+`fulfill_license_purchase`, `database/add_license_purchase_fulfillment.sql`).
 
 ---
 
@@ -354,9 +304,8 @@ POST /api/licenses/addon
 x-internal-api-key: <MOIL_INTERNAL_API_KEY>
 ```
 
-Unlike `/activate`, this endpoint is not open. `/activate` mutates a row whose
-`licenseId` the caller already holds — the id is the capability. This one
-**creates** rows, so an open version would let anyone reaching the host write
+Like `/activate` (which requires the key since 2026-11-20), this endpoint is
+not open. This one **creates** rows, so an open version would let anyone reaching the host write
 licence records against any email. It returns **503** when
 `MOIL_INTERNAL_API_KEY` is unset: a missing key never means "allow everyone".
 

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { moilApiUrl, moilPartnerApiKey } from '@/lib/moilApi';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { recordAddonLicense } from '@/lib/addonLicense';
 import {
@@ -92,7 +93,9 @@ export async function POST(request: Request) {
 
     const normalizedEmail = email.toLowerCase();
 
-    if (!process.env.NEXT_PUBLIC_QC_API_KEY || !process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION) {
+    const moilKey = moilPartnerApiKey();
+    const moilUrl = moilApiUrl();
+    if (!moilKey || !moilUrl) {
       return NextResponse.json(
         { error: 'Moil backend is not configured on this server.' },
         { status: 503 }
@@ -123,12 +126,12 @@ export async function POST(request: Request) {
     let moilResult: MoilGrantResult | null = null;
     try {
       const resp = await fetch(
-        `${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/employer/grant_plan_addon`,
+        `${moilUrl}/api/employer/grant_plan_addon`,
         {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY,
+            'x-api-key': moilKey,
           },
           body: JSON.stringify({
             emails: [

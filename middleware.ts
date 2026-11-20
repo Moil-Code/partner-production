@@ -39,6 +39,8 @@ export async function middleware(request: NextRequest) {
   const isPublicApiRoute =
     request.nextUrl.pathname.startsWith('/api/health') ||
     request.nextUrl.pathname.startsWith('/api/licenses/verify') ||
+    // Called by the main API only; enforces the shared internal key itself
+    // (no session), so it stays off the login redirect.
     request.nextUrl.pathname.startsWith('/api/licenses/activate') ||
     // Service-to-service: the Moil backend mirrors a plan grant here. Unlike
     // its siblings this route is NOT open — it enforces MOIL_INTERNAL_API_KEY
@@ -54,7 +56,11 @@ export async function middleware(request: NextRequest) {
     // Moil backend sweep that marks already-signed-up users' seats Activated.
     // Enforces the shared secret itself (fails closed), no session.
     request.nextUrl.pathname.startsWith('/api/licenses/reconcile') ||
-    request.nextUrl.pathname.startsWith('/api/licenses/purchase') ||
+    // Stripe-webhook fulfilment, called by the main API. Enforces the shared
+    // internal key itself and fails closed. The browser redirect
+    // /api/licenses/purchase is deliberately NOT public any more: it no longer
+    // changes anything and needs the person's session to land on the dashboard.
+    request.nextUrl.pathname.startsWith('/api/licenses/purchase/fulfill') ||
     request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||
     // Resend delivery/open/click events. No session; verifies the Svix
     // signature itself and fails closed when RESEND_WEBHOOK_SECRET is unset.

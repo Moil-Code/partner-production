@@ -74,7 +74,7 @@ const DashboardPage = () => {
   const [showPurchaseModal, setShowPurchaseModal] = useState(false);
   const [purchasing, setPurchasing] = useState(false);
   const [purchaseError, setPurchaseError] = useState('');
-  const [adminEmail, setAdminEmail] = useState('');
+  const [, setAdminEmail] = useState('');
   const [showTeamManagement, setShowTeamManagement] = useState(false);
   const [showActivityPanel, setShowActivityPanel] = useState(false);
   const [partner, setPartner] = useState<Partner | null>(null);
@@ -110,7 +110,21 @@ const DashboardPage = () => {
     const errorParam = urlParams.get('error');
     const licensesAdded = urlParams.get('licenses_added');
 
-    if (successParam === 'purchase_complete' && licensesAdded) {
+    if (urlParams.get('purchase') === 'processing') {
+      // Seats are added by the Stripe webhook, which can land a few seconds
+      // after this redirect; say so instead of claiming they are already in.
+      toast({
+        title: "Payment received",
+        description: "Your new licenses are being added. They will appear in a moment.",
+        type: "success",
+        duration: 8000
+      });
+      window.history.replaceState({}, document.title, window.location.pathname);
+      setTimeout(() => {
+        fetchLicenseStats();
+        initialFetchLicenses();
+      }, 5000);
+    } else if (successParam === 'purchase_complete' && licensesAdded) {
       toast({
         title: "Payment Successful",
         description: `🎉 Added ${licensesAdded} license${parseInt(licensesAdded) > 1 ? 's' : ''} to your account.`,
@@ -358,23 +372,22 @@ const DashboardPage = () => {
     setPurchaseError('');
 
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION}/api/stripe/buy-licenses`, {
+      // The server resolves who is buying and calls the main API with the
+      // partner key; the key never reaches the browser.
+      const response = await fetch('/api/licenses/checkout', {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.NEXT_PUBLIC_QC_API_KEY || '',
-        },
-        body: JSON.stringify({ 
-          name: `Moil Partner ${partner?.program_name}`,
-          email: adminEmail,
-          numberOfLicenses: count
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count }),
       });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
 
-      if (!data.success) {
-        setPurchaseError(data.message || 'Failed to initiate purchase');
+      if (!data?.success) {
+        const message =
+          (typeof data?.message === 'string' && data.message) ||
+          (typeof data?.status === 'string' && data.status) ||
+          'Failed to initiate purchase';
+        setPurchaseError(message);
         setPurchasing(false);
         return;
       }
