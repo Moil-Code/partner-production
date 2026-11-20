@@ -1,4 +1,5 @@
 import { Resend } from 'resend';
+import { createHash } from 'crypto';
 import { LicenseActivationEmail } from '../emails/license-activation';
 import { LicenseActivationReminderEmail } from '../emails/license-activation-reminder';
 import { LicenseClaimEmail } from '../emails/license-claim';
@@ -109,6 +110,12 @@ export interface LicenseActivationData {
   adminName: string;
   adminEmail?: string; // Used to determine which EDC the admin belongs to
   edc?: EdcEmailInfo; // Optional: pass EDC info directly
+  /**
+   * Resend idempotency key (24 h). Set on FIRST sends only, e.g.
+   * `license:activation:<licenseId>`, so a retried request cannot email twice.
+   * Never set on a manual resend: a resend must send again.
+   */
+  idempotencyKey?: string;
 }
 
 export interface TeamInvitationData {
@@ -178,6 +185,11 @@ export async function getPartnerEmailInfoFromDb(partnerId: string): Promise<EdcE
 /**
  * Get EDC info for email based on admin email or provided EDC
  */
+/** Stable short digest of a batch's license ids, for its idempotency key. */
+function batchKey(licenseIds: string[]): string {
+  return createHash('sha256').update([...licenseIds].sort().join(',')).digest('hex').slice(0, 32);
+}
+
 function getEdcInfoForEmail(adminEmail?: string, providedEdc?: EdcEmailInfo): EdcEmailInfo {
   if (providedEdc) {
     return providedEdc;
@@ -215,7 +227,7 @@ export async function sendLicenseActivationEmail(data: LicenseActivationData) {
           adminName: data.adminName,
           edc: edcInfo,
         }),
-      });
+      }, data.idempotencyKey ? { idempotencyKey: data.idempotencyKey } : undefined);
     });
 
     if (result.error) {
@@ -238,6 +250,8 @@ export interface LicenseActivationReminderData {
   reminderNumber: number;
   adminEmail?: string;
   edc?: EdcEmailInfo;
+  /** Resend idempotency key, e.g. `license-reminder:<licenseId>:<n>`. */
+  idempotencyKey?: string;
 }
 
 export async function sendLicenseActivationReminderEmail(
@@ -262,7 +276,7 @@ export async function sendLicenseActivationReminderEmail(
           reminderNumber: data.reminderNumber,
           edc: edcInfo,
         }),
-      });
+      }, data.idempotencyKey ? { idempotencyKey: data.idempotencyKey } : undefined);
     });
 
     if (result.error) {
@@ -330,6 +344,12 @@ export interface BatchLicenseActivationData {
   adminName: string;
   adminEmail?: string;
   edc?: EdcEmailInfo;
+  /**
+   * First sends only. Resend keys a batch REQUEST, so each batch of up to 100
+   * gets `license:activation-batch:<sha256 of its license ids>` — a retried
+   * call with the same seats cannot email them twice.
+   */
+  idempotent?: boolean;
 }
 
 export async function sendBatchLicenseActivationEmails(data: BatchLicenseActivationData) {
@@ -388,7 +408,12 @@ export async function sendBatchLicenseActivationEmails(data: BatchLicenseActivat
           }));
 
           // Send batch
-          const result = await resend.batch.send(batchEmails);
+          const result = await resend.batch.send(
+            batchEmails,
+            data.idempotent
+              ? { idempotencyKey: `license:activation-batch:${batchKey(batch.map((l) => l.licenseId))}` }
+              : undefined,
+          );
           
           console.log(`Batch ${i + 1} response:`, result.error ? 'Error' : 'Success');
 
@@ -685,6 +710,12 @@ export interface LicenseClaimData {
   loginUrl: string;
   partnerName: string;
   edc?: EdcEmailInfo;
+  /**
+   * Resend idempotency key (24 h). Set on FIRST sends only, e.g.
+   * `license:activation:<licenseId>`, so a retried request cannot email twice.
+   * Never set on a manual resend: a resend must send again.
+   */
+  idempotencyKey?: string;
 }
 
 export async function sendLicenseClaimEmail(data: LicenseClaimData) {
@@ -704,7 +735,7 @@ export async function sendLicenseClaimEmail(data: LicenseClaimData) {
           partnerName: data.partnerName,
           edc: edcInfo,
         }),
-      })
+      }, data.idempotencyKey ? { idempotencyKey: data.idempotencyKey } : undefined)
     );
     if (result.error) {
       console.error('Resend API error (claim):', result.error);
@@ -743,6 +774,12 @@ export interface LicenseActivatedData {
   partnerName: string;
   planName: string;
   edc?: EdcEmailInfo;
+  /**
+   * Resend idempotency key (24 h). Set on FIRST sends only, e.g.
+   * `license:activation:<licenseId>`, so a retried request cannot email twice.
+   * Never set on a manual resend: a resend must send again.
+   */
+  idempotencyKey?: string;
 }
 
 export async function sendLicenseActivatedEmail(data: LicenseActivatedData) {
@@ -763,7 +800,7 @@ export async function sendLicenseActivatedEmail(data: LicenseActivatedData) {
           planName: data.planName,
           edc: edcInfo,
         }),
-      })
+      }, data.idempotencyKey ? { idempotencyKey: data.idempotencyKey } : undefined)
     );
     if (result.error) {
       console.error('Resend API error (activated):', result.error);

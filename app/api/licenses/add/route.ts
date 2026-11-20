@@ -353,6 +353,13 @@ export async function POST(request: Request) {
     const loginUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/login?ref=moilPartners&org=${orgSlug}`;
     const activationUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com'}/register?licenseId=${license.id}&ref=moilPartners&org=${orgSlug}`;
 
+    // Resend idempotency key for this FIRST email about the seat, so a retried
+    // request cannot email twice. An upgrade reuses the row, so its key names
+    // the plan too (a later, different upgrade still gets its email).
+    const firstEmailKey = (kind: string) =>
+      `license:${kind}:${license.id}` +
+      (isUpgrade ? `:upgrade:${planDefaults.plan}:${planDefaults.billingCycle}:${planDefaults.months}` : '');
+
     let emailStatus = 'pending';
     let messageId: string | undefined;
     let emailKind: 'activation' | 'claim' | 'activated' = 'activation';
@@ -371,6 +378,7 @@ export async function POST(request: Request) {
         partnerName,
         planName: planDisplay,
         edc: edcInfo,
+        idempotencyKey: firstEmailKey('activated'),
       });
       emailStatus = r.success ? 'sent' : 'failed';
       messageId = r.messageId;
@@ -383,6 +391,7 @@ export async function POST(request: Request) {
         loginUrl,
         partnerName,
         edc: edcInfo,
+        idempotencyKey: firstEmailKey('claim'),
       });
       emailStatus = r.success ? 'sent' : 'failed';
       messageId = r.messageId;
@@ -403,6 +412,7 @@ export async function POST(request: Request) {
         activationUrl,
         adminName: `${adminData.first_name} ${adminData.last_name}`,
         edc: edcInfo,
+        idempotencyKey: firstEmailKey('activation'),
       });
       emailStatus = r.success ? 'sent' : 'failed';
       messageId = r.messageId;

@@ -291,6 +291,7 @@ export async function POST(request: Request) {
       adminName: `${admin.first_name} ${admin.last_name}`,
       adminEmail: admin.email,
       edc: edcInfo,
+      idempotent: true,
     }) : { results: [], sent: 0, failed: 0 };
 
     await recordLicenseEmails(

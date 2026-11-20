@@ -273,8 +273,8 @@ export async function POST(request: Request) {
     const adminName = `${adminData.first_name} ${adminData.last_name}`;
 
     const toActivationEmail: Array<{ email: string; licenseId: string; activationUrl: string }> = [];
-    const toClaimEmail: Array<{ email: string; loginUrl: string; partnerName: string; edc: EdcEmailInfo }> = [];
-    const toActivatedEmail: Array<{ email: string; loginUrl: string; partnerName: string; planName: string; edc: EdcEmailInfo }> = [];
+    const toClaimEmail: Array<{ email: string; loginUrl: string; partnerName: string; edc: EdcEmailInfo; idempotencyKey: string }> = [];
+    const toActivatedEmail: Array<{ email: string; loginUrl: string; partnerName: string; planName: string; edc: EdcEmailInfo; idempotencyKey: string }> = [];
     const alreadyHandled = new Set<string>();
 
     for (const email of newEmails) {
@@ -285,10 +285,10 @@ export async function POST(request: Request) {
       const status = moil?.license_status;
 
       if (status === 'activated') {
-        toActivatedEmail.push({ email, loginUrl, partnerName, planName: PARTNER_PLAN_DISPLAY, edc: edcInfo });
+        toActivatedEmail.push({ email, loginUrl, partnerName, planName: PARTNER_PLAN_DISPLAY, edc: edcInfo, idempotencyKey: `license:activated:${licenseId}` });
         alreadyHandled.add(email);
       } else if (status === 'pending_invite' && moil?.has_account === true) {
-        toClaimEmail.push({ email, loginUrl, partnerName, edc: edcInfo });
+        toClaimEmail.push({ email, loginUrl, partnerName, edc: edcInfo, idempotencyKey: `license:claim:${licenseId}` });
         alreadyHandled.add(email);
       } else if (status === 'already_assigned' || status === 'blocked_downgrade') {
         alreadyHandled.add(email);
@@ -317,7 +317,7 @@ export async function POST(request: Request) {
     // Dispatch emails in parallel (each batch respects the queue rate limit internally)
     const [activationResults, claimResults, activatedResults] = await Promise.all([
       toActivationEmail.length > 0
-        ? sendBatchLicenseActivationEmails({ licenses: toActivationEmail, adminName, adminEmail: adminData.email, edc: edcInfo })
+        ? sendBatchLicenseActivationEmails({ licenses: toActivationEmail, adminName, adminEmail: adminData.email, edc: edcInfo, idempotent: true })
         : Promise.resolve({ results: [], sent: 0, failed: 0 }),
       toClaimEmail.length > 0
         ? sendBatchLicenseClaimEmails(toClaimEmail)

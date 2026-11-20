@@ -162,12 +162,45 @@ async function handle(request: NextRequest) {
     );
     const nextReminderNumber = license.reminder_count + 1;
 
+    // CLAIM FIRST (compare-and-set). The stamp used to be written AFTER the
+    // send, so a crash between the two, or two overlapping cron runs reading
+    // the same due row, sent the same reminder twice. Now the row moves to the
+    // next reminder only if it still holds the values we read; the run whose
+    // update matched owns the send, every other run skips the seat.
+    const claimedAt = new Date().toISOString();
+    let claim = supabase
+      .from('licenses')
+      .update({
+        last_reminder_sent_at: claimedAt,
+        reminder_count: nextReminderNumber,
+      })
+      .eq('id', license.id)
+      .eq('is_activated', false)
+      .eq('reminder_count', license.reminder_count);
+    claim = license.last_reminder_sent_at === null
+      ? claim.is('last_reminder_sent_at', null)
+      : claim.eq('last_reminder_sent_at', license.last_reminder_sent_at);
+    const { data: claimed, error: claimError } = await claim.select('id');
+
+    if (claimError) {
+      failed += 1;
+      console.error(`send-reminders: claim failed for license ${license.id}`, claimError);
+      continue;
+    }
+    if (!claimed || claimed.length === 0) {
+      // Another run claimed it, or the seat changed since we read it.
+      continue;
+    }
+
     const result = await sendLicenseActivationReminderEmail({
       email: license.email,
       activationUrl: buildActivationUrl(license.id, partner?.name || null),
       daysSinceAssigned,
       reminderNumber: nextReminderNumber,
       edc,
+      // Resend drops a second send with the same key (24 h), so even a retry
+      // after an ambiguous failure cannot deliver this reminder twice.
+      idempotencyKey: `license-reminder:${license.id}:${nextReminderNumber}`,
     });
 
     if (!result.success) {
@@ -176,6 +209,20 @@ async function handle(request: NextRequest) {
         `send-reminders: failed for license ${license.id}`,
         result.error,
       );
+      // Give the claim back, but only if it is still ours (compare-and-set),
+      // so the next run tries again.
+      const { error: releaseError } = await supabase
+        .from('licenses')
+        .update({
+          last_reminder_sent_at: license.last_reminder_sent_at,
+          reminder_count: license.reminder_count,
+        })
+        .eq('id', license.id)
+        .eq('reminder_count', nextReminderNumber)
+        .eq('last_reminder_sent_at', claimedAt);
+      if (releaseError) {
+        console.error(`send-reminders: could not release claim for ${license.id}`, releaseError);
+      }
       continue;
     }
 
@@ -184,25 +231,6 @@ async function handle(request: NextRequest) {
     await recordLicenseEmails(supabase, [
       { messageId: result.messageId, licenseId: license.id, kind: 'reminder', recipient: license.email },
     ]);
-
-    const { error: updateError } = await supabase
-      .from('licenses')
-      .update({
-        last_reminder_sent_at: new Date().toISOString(),
-        reminder_count: nextReminderNumber,
-      })
-      .eq('id', license.id);
-
-    if (updateError) {
-      // Email went out but we couldn't record it — log loud, count as failed
-      // so we notice. Worst case the next run sends a duplicate.
-      failed += 1;
-      console.error(
-        `send-reminders: email sent but update failed for ${license.id}`,
-        updateError,
-      );
-      continue;
-    }
 
     await supabase.rpc('log_activity', {
       p_admin_id: license.admin_id,
