@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { randomUUID } from 'crypto';
 import { moilApiUrl, moilPartnerApiKey } from '@/lib/moilApi';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { recordLicenseEmails } from '@/lib/licenseEmailLog';
@@ -9,6 +10,8 @@ import {
   type EdcEmailInfo,
 } from '@/lib/email';
 import { parsePlanKey } from '@/lib/licensePlanDefaults';
+import { issueLicensesViaOutbox, licenseIssueConfig } from '@/lib/outbox/licenseIssue';
+import { decideSender, type Sender } from '@/lib/outbox/rules';
 
 // All partner-issued licenses grant exactly this plan.
 const PARTNER_PLAN_DEFAULTS = { plan: 'standard', billingCycle: 'yearly' };
@@ -157,31 +160,86 @@ export async function POST(request: Request) {
       );
     }
 
-    // Insert all new license rows first so we can pass licenseIds to the Moil backend.
-    const { data: insertedLicenses, error: insertError } = await supabase
-      .from('licenses')
-      .insert(
-        newEmails.map((email) => ({
+    type InsertedLicense = { id: string; email: string; is_activated: boolean; created_at: string };
+
+    // Who activates and emails each licence: this request ('legacy') or the
+    // outbox drain ('outbox'), decided once per licence id and stored on its
+    // outbox event (lib/outbox/licenseIssue.ts). Unlisted = 'legacy'.
+    const senderByEmail = new Map<string, Sender>();
+    let issuedLicenses: InsertedLicense[] | null = null;
+    const issueCfg = licenseIssueConfig();
+    if (issueCfg.mode !== 'off') {
+      // One transaction: seats re-checked under a lock on the team, the
+      // licences inserted, their activate + email outbox events emitted.
+      const rows = newEmails.map((email) => {
+        const id = randomUUID();
+        return {
+          id,
           email,
-          admin_id: user.id,
-          business_name: '',
-          business_type: '',
-          is_activated: false,
-          team_id: teamId || null,
-          performed_by: user.id,
           plan_tier: PARTNER_PLAN_DEFAULTS.plan,
           billing_cycle: PARTNER_PLAN_DEFAULTS.billingCycle,
           months: null,
-        }))
-      )
-      .select();
+          sender: decideSender(issueCfg.mode, issueCfg.canary, id),
+        };
+      });
+      const r = await issueLicensesViaOutbox(adminSupabase, {
+        adminId: user.id,
+        teamId: teamId || null,
+        partnerId: partnerInfo?.id ?? null,
+        rows,
+      });
+      if (r.status === 'ok') {
+        issuedLicenses = r.licenses;
+        for (const row of rows) senderByEmail.set(row.email, row.sender);
+      } else if (r.status === 'no_seats') {
+        return NextResponse.json(
+          r.available <= 0
+            ? { error: 'No available licenses. Please purchase more licenses.' }
+            : { error: `Only ${r.available} license(s) available. You're trying to add ${newEmails.length}.` },
+          { status: 400 }
+        );
+      } else if (r.status === 'exists') {
+        // Lost a race with another add for the same email(s).
+        return NextResponse.json(
+          {
+            error: `The following email(s) already have licenses allocated: ${r.emails.join(', ')}. If this is a mistake, please contact cs@moilapp.com`,
+            emailsWithLicenses: r.emails,
+          },
+          { status: 400 }
+        );
+      } else if (r.status === 'error') {
+        return NextResponse.json({ error: 'Failed to insert licenses' }, { status: 500 });
+      }
+      // 'unavailable' (migration not applied) or 'rpc_failed' (nothing was
+      // written): insert inline below, exactly as before.
+    }
+
+    // Insert all new license rows first so we can pass licenseIds to the Moil backend.
+    const { data: insertedLicenses, error: insertError } = issuedLicenses
+      ? { data: issuedLicenses, error: null }
+      : await supabase
+          .from('licenses')
+          .insert(
+            newEmails.map((email) => ({
+              email,
+              admin_id: user.id,
+              business_name: '',
+              business_type: '',
+              is_activated: false,
+              team_id: teamId || null,
+              performed_by: user.id,
+              plan_tier: PARTNER_PLAN_DEFAULTS.plan,
+              billing_cycle: PARTNER_PLAN_DEFAULTS.billingCycle,
+              months: null,
+            }))
+          )
+          .select();
 
     if (insertError) {
       console.error('Batch insert error:', insertError);
       return NextResponse.json({ error: `Failed to insert licenses: ${insertError.message}` }, { status: 500 });
     }
 
-    type InsertedLicense = { id: string; email: string; is_activated: boolean; created_at: string };
     const licenseByEmail = new Map<string, InsertedLicense>(
       ((insertedLicenses || []) as InsertedLicense[]).map((l) => [l.email, l])
     );
@@ -198,10 +256,13 @@ export async function POST(request: Request) {
     };
     const moilResultByEmail = new Map<string, MoilResult>();
 
+    // Licences this request activates and emails; the drain does the rest.
+    const legacyEmails = newEmails.filter((email) => senderByEmail.get(email) !== 'outbox');
+
     try {
       const moilKey = moilPartnerApiKey();
       const moilUrl = moilApiUrl();
-      if (moilKey && moilUrl && newEmails.length > 0) {
+      if (moilKey && moilUrl && legacyEmails.length > 0) {
         const resp = await fetch(
           `${moilUrl}/api/employer/activate_license`,
           {
@@ -211,7 +272,7 @@ export async function POST(request: Request) {
               'x-api-key': moilKey,
             },
             body: JSON.stringify({
-              emails: newEmails.map((email) => ({
+              emails: legacyEmails.map((email) => ({
                 email,
                 licenseId: licenseByEmail.get(email)?.id,
               })),
@@ -236,7 +297,7 @@ export async function POST(request: Request) {
     }
 
     // Persist optional Moil-reported metadata (moil_user_id / expiry / resolved plan).
-    const metadataUpdates = newEmails
+    const metadataUpdates = legacyEmails
       .map((email) => {
         const moil = moilResultByEmail.get(email);
         const licenseId = licenseByEmail.get(email)?.id;
@@ -277,7 +338,7 @@ export async function POST(request: Request) {
     const toActivatedEmail: Array<{ email: string; loginUrl: string; partnerName: string; planName: string; edc: EdcEmailInfo; idempotencyKey: string }> = [];
     const alreadyHandled = new Set<string>();
 
-    for (const email of newEmails) {
+    for (const email of legacyEmails) {
       const moil = moilResultByEmail.get(email);
       const licenseId = licenseByEmail.get(email)?.id;
       if (!licenseId) continue;

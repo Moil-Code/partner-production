@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { randomUUID } from 'crypto';
 import { moilApiUrl, moilPartnerApiKey } from '@/lib/moilApi';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { recordLicenseEmails } from '@/lib/licenseEmailLog';
@@ -16,6 +17,8 @@ import {
   type BillingCycle,
 } from '@/lib/licensePlanDefaults';
 import { resolveIssuablePlan, isMoilAdmin } from '@/lib/licenseIssuePolicy';
+import { issueLicensesViaOutbox, licenseIssueConfig } from '@/lib/outbox/licenseIssue';
+import { decideSender, type Sender } from '@/lib/outbox/rules';
 
 export async function POST(request: Request) {
   try {
@@ -247,6 +250,11 @@ export async function POST(request: Request) {
     };
 
     let license: { id: string; email: string; created_at: string };
+    // Who activates and emails this licence: this request ('legacy') or the
+    // outbox drain ('outbox'). Decided once, stored on the outbox event, and
+    // read here, so the two never both send (lib/outbox/licenseIssue.ts).
+    // An upgrade always stays inline.
+    let sender: Sender = 'legacy';
 
     if (isUpgrade && globalLicense) {
       const { data: updated, error: updateError } = await adminSupabase
@@ -262,27 +270,70 @@ export async function POST(request: Request) {
       }
       license = updated;
     } else {
-      const { data: created, error: licenseError } = await supabase
-        .from('licenses')
-        .insert({
-          admin_id: user.id,
-          email: email.toLowerCase(),
-          business_name: '',
-          business_type: '',
-          is_activated: false,
-          team_id: teamId || null,
-          performed_by: user.id,
-          grant_kind: 'base',
-          ...planColumns,
-        })
-        .select()
-        .single();
-
-      if (licenseError || !created) {
-        console.error('License creation error:', licenseError);
-        return NextResponse.json({ error: 'Failed to create license' }, { status: 500 });
+      let issued: { id: string; email: string; created_at: string } | null = null;
+      const issueCfg = licenseIssueConfig();
+      if (issueCfg.mode !== 'off') {
+        // One transaction: seats re-checked under a lock on the team, the
+        // licence inserted, its activate + email outbox events emitted.
+        const id = randomUUID();
+        const rowSender = decideSender(issueCfg.mode, issueCfg.canary, id);
+        const r = await issueLicensesViaOutbox(adminSupabase, {
+          adminId: user.id,
+          teamId: teamId || null,
+          partnerId: partnerInfo?.id ?? null,
+          rows: [{ id, email: email.toLowerCase(), ...planColumns, sender: rowSender }],
+        });
+        if (r.status === 'ok' && r.licenses[0]) {
+          issued = r.licenses[0];
+          sender = rowSender;
+        } else if (r.status === 'no_seats') {
+          return NextResponse.json(
+            { error: 'No available licenses. Please purchase more licenses.' },
+            { status: 400 }
+          );
+        } else if (r.status === 'exists') {
+          // Lost a race with another add for the same email.
+          return NextResponse.json(
+            {
+              error:
+                'This email already has a license allocated. If this is a mistake, please contact cs@moilapp.com',
+              code: 'LICENSE_EXISTS',
+              upgradable: false,
+            },
+            { status: 409 }
+          );
+        } else if (r.status === 'error') {
+          return NextResponse.json({ error: 'Failed to create license' }, { status: 500 });
+        }
+        // 'unavailable' (migration not applied) or 'rpc_failed' (nothing was
+        // written): insert inline below, exactly as before.
       }
-      license = created;
+
+      if (issued) {
+        license = issued;
+      } else {
+        const { data: created, error: licenseError } = await supabase
+          .from('licenses')
+          .insert({
+            admin_id: user.id,
+            email: email.toLowerCase(),
+            business_name: '',
+            business_type: '',
+            is_activated: false,
+            team_id: teamId || null,
+            performed_by: user.id,
+            grant_kind: 'base',
+            ...planColumns,
+          })
+          .select()
+          .single();
+
+        if (licenseError || !created) {
+          console.error('License creation error:', licenseError);
+          return NextResponse.json({ error: 'Failed to create license' }, { status: 500 });
+        }
+        license = created;
+      }
     }
 
     // Call the Moil backend to grant / upgrade the standard_yearly plan.
@@ -301,7 +352,8 @@ export async function POST(request: Request) {
     try {
       const moilKey = moilPartnerApiKey();
       const moilUrl = moilApiUrl();
-      if (moilKey && moilUrl) {
+      // sender 'outbox': the drain activates (license.activate event).
+      if (sender === 'legacy' && moilKey && moilUrl) {
         const resp = await fetch(
           `${moilUrl}/api/employer/activate_license`,
           {
@@ -364,7 +416,10 @@ export async function POST(request: Request) {
     let messageId: string | undefined;
     let emailKind: 'activation' | 'claim' | 'activated' = 'activation';
 
-    if (status === 'activated') {
+    if (sender === 'outbox') {
+      // The drain sends the first email once the activation succeeded
+      // (license.email event, ordered after license.activate).
+    } else if (status === 'activated') {
       // User had a profile — plan was applied directly. Send "your license is active" email.
       await supabase
         .from('licenses')
@@ -418,18 +473,21 @@ export async function POST(request: Request) {
       messageId = r.messageId;
     }
 
-    // Persist email tracking
-    await supabase
-      .from('licenses')
-      .update({
-        email_status: emailStatus,
-        ...(messageId ? { message_id: messageId } : {}),
-      })
-      .eq('id', license.id);
+    // Persist email tracking. Not for an outbox-sent licence: the drain owns
+    // email_status there, and writing 'pending' back could race its 'sent'.
+    if (sender === 'legacy') {
+      await supabase
+        .from('licenses')
+        .update({
+          email_status: emailStatus,
+          ...(messageId ? { message_id: messageId } : {}),
+        })
+        .eq('id', license.id);
 
-    await recordLicenseEmails(adminSupabase, [
-      { messageId, licenseId: license.id, kind: emailKind, recipient: license.email },
-    ]);
+      await recordLicenseEmails(adminSupabase, [
+        { messageId, licenseId: license.id, kind: emailKind, recipient: license.email },
+      ]);
+    }
 
     if (teamMember?.team_id) {
       await supabase.rpc('log_activity', {

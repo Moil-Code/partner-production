@@ -62,6 +62,9 @@ export async function middleware(request: NextRequest) {
     // changes anything and needs the person's session to land on the dashboard.
     request.nextUrl.pathname.startsWith('/api/licenses/purchase/fulfill') ||
     request.nextUrl.pathname.startsWith('/api/licenses/send-reminders') ||
+    // Outbox drain, called every minute by the VPS cron. No session; enforces
+    // the shared internal key itself and fails closed (503) when unset.
+    request.nextUrl.pathname.startsWith('/api/outbox/drain') ||
     // Resend delivery/open/click events. No session; verifies the Svix
     // signature itself and fails closed when RESEND_WEBHOOK_SECRET is unset.
     // Without this entry Resend would get a redirect, count it as a failed

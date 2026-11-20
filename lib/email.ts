@@ -232,7 +232,7 @@ export async function sendLicenseActivationEmail(data: LicenseActivationData) {
 
     if (result.error) {
       console.error('Resend API error:', result.error);
-      return { success: false, error: result.error.message };
+      return { success: false, error: result.error.message, errorName: result.error.name };
     }
 
     console.log('License activation email sent:', result.data?.id);
@@ -739,7 +739,7 @@ export async function sendLicenseClaimEmail(data: LicenseClaimData) {
     );
     if (result.error) {
       console.error('Resend API error (claim):', result.error);
-      return { success: false, error: result.error.message };
+      return { success: false, error: result.error.message, errorName: result.error.name };
     }
     return { success: true, messageId: result.data?.id };
   } catch (error) {
@@ -804,7 +804,7 @@ export async function sendLicenseActivatedEmail(data: LicenseActivatedData) {
     );
     if (result.error) {
       console.error('Resend API error (activated):', result.error);
-      return { success: false, error: result.error.message };
+      return { success: false, error: result.error.message, errorName: result.error.name };
     }
     return { success: true, messageId: result.data?.id };
   } catch (error) {

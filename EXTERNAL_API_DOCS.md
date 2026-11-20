@@ -14,6 +14,8 @@ This document describes the public API endpoints that can be called by external 
 4. [Record Plan Add-on](#4-record-plan-add-on)
 5. [List License Assignments](#5-list-license-assignments)
 6. [List Partners](#6-list-partners)
+7. [Reconcile Seat Status](#7-reconcile-seat-status)
+8. [Outbox Drain (VPS cron)](#8-outbox-drain-vps-cron)
 6. [License Plan Metadata Columns](#license-plan-metadata-columns)
 
 ---
@@ -624,6 +626,94 @@ without writing.
 { "success": true, "dryRun": false,
   "summary": { "activated": 3, "notFound": 1 },
   "results": [{ "index": 0, "licenseId": "…", "status": "activated" }] }
+```
+
+---
+
+## 8. Outbox Drain (VPS cron)
+
+Performs pending outbox events: the main-API licence activation and the first
+licence email for seats issued through `issue_licenses`
+(`database/add_license_issue_outbox.sql`). The partner app runs on Vercel and
+has no long-lived process, so the VPS cron calls this every minute.
+
+### Endpoint
+
+```
+POST /api/outbox/drain
+```
+
+### Authentication
+
+`x-internal-api-key` (or `x-api-key`) equal to `INTERNAL_API_KEY` /
+`MOIL_INTERNAL_API_KEY` on the partner app. 503 when neither is set, 401 when
+the key is wrong. On the middleware allowlist (no session).
+
+### What one call does
+
+- claims at most 20 due rows, 5 at a time (`outbox_claim`, `FOR UPDATE SKIP LOCKED`,
+  60 s lease), stops claiming after `OUTBOX_DRAIN_BUDGET_MS` (default 20 s), gives
+  each handler 15 s, and settles each row (`delivered`, `retry` with backoff
+  10 s x 3^(n-1) capped at 6 h, `dead` after 10 attempts or at once on a
+  non-retryable answer);
+- once an hour (UTC minute 0) prunes delivered rows older than 14 days.
+
+Handlers: `license.activate` calls the main API's
+`/api/employer/activate_license` for one licence and records the answer on the
+licence (`moil_license_status`, `moil_has_account`); `license.email` sends the
+first email that answer calls for, with the outbox key as the Resend
+idempotency key, and records it in `license_emails`. Both share the ordering
+key `license:<id>`, and the email waits until an answer is recorded, so no
+email goes out before the activation succeeded. Events whose payload says
+`sender: "legacy"` are only checked (the route sent inline; shadow mode).
+
+### Response (200)
+
+```json
+{
+  "enabled": true,
+  "available": true,
+  "claimed": 4, "delivered": 3, "retried": 1, "dead": 0,
+  "shadowVerified": 2, "shadowLegacyFailed": 0,
+  "settleFailed": 0, "claimFailed": false, "notHolder": 0,
+  "pending": 7, "oldestPendingSeconds": 42, "deadTotal": 0,
+  "byType": [{ "event_type": "license.email", "pending": 4, "oldest_pending_seconds": 42, "dead": 0, "delivered_last_hour": 9 }],
+  "durationMs": 1830,
+  "pruned": null
+}
+```
+
+`available: false`: the outbox migration is not applied (nothing to do).
+`enabled: false`: `OUTBOX_DRAIN=false` (rows wait, nothing is lost).
+Watch `pending`, `oldestPendingSeconds` and `deadTotal`; the cron log carries
+one JSON line per minute that the OTel collector can read.
+
+### The crontab line (VPS)
+
+Put the key in a header file, never on the command line (it would show in `ps`
+and in the crontab):
+
+```
+# /etc/moil/partner-outbox.headers  (chmod 600, owned by the cron user)
+x-internal-api-key: <the value of INTERNAL_API_KEY on the partner app>
+```
+
+```
+* * * * * flock -n /tmp/partner-outbox-drain.lock curl -sS -m 65 -X POST -H @/etc/moil/partner-outbox.headers https://partners.moilapp.com/api/outbox/drain >> /var/log/moil/partner-outbox-drain.log 2>&1
+```
+
+`flock -n` skips a minute rather than overlapping a pass still running; the
+SQL lease would make an overlap safe anyway. A missed minute only delays work.
+
+### Operations (Supabase SQL editor, service role)
+
+```sql
+select * from public.outbox_health();
+-- replay dead rows by id, or by type and window (logged with who):
+select public.outbox_replay('you@moilapp.com', array['<event id>']::uuid[]);
+select public.outbox_replay('you@moilapp.com', null, 'license.email', '2026-11-20', '2026-11-21');
+-- cancel pending rows of a type (kept for audit):
+select public.outbox_cancel('you@moilapp.com', 'license.email');
 ```
 
 ---

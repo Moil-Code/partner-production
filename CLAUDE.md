@@ -13,7 +13,7 @@ Moil Partners — a Next.js 16 / React 19 multi-tenant SaaS dashboard for managi
 - `npm run start` — serve the production build
 - `npm run lint` — ESLint via the flat-config in `eslint.config.mjs` (extends `next/core-web-vitals` + `next/typescript`)
 
-There is **no test runner configured** in this repo — do not invent `npm test` etc. Type-check by running `npx tsc --noEmit` if needed (`tsconfig.json` already has `noEmit: true`).
+There is **no general test runner** in this repo — do not invent `npm test`. The one exception is `npm run test:outbox` (`node --test` on `tests/outbox/*.test.mjs`, no dependency): it loads the pure TypeScript modules in `lib/outbox/` directly (Node strips the types), which is why those modules import each other with explicit `.ts` extensions and never through `@/` (`tsconfig.json` has `allowImportingTsExtensions`). `tests/outbox/sql.test.mjs` also runs the outbox SQL against a real Postgres when `OUTBOX_TEST_PG_URL` names a DISPOSABLE database (it drops the public schema); otherwise it checks the SQL text only and says so. Type-check by running `npx tsc --noEmit` (`tsconfig.json` already has `noEmit: true`).
 
 Database changes are applied manually: open Supabase SQL Editor and run the relevant file from `database/` (`moil_complete_schema.sql` is the source-of-truth full schema; one-off fix scripts like `fix_partners_insert_rls.sql` sit alongside).
 
@@ -33,6 +33,8 @@ The actual env var names used in code differ from `env.example` (which is stale)
 - `MOIL_API_URL` — main API base URL for server code (falls back to `NEXT_PUBLIC_MOIL_PAYMENT_ACTIVATION`)
 - `INTERNAL_API_KEY` or `MOIL_INTERNAL_API_KEY` — shared secret the main API sends as `x-internal-api-key` (`lib/internalApiKey.ts`); required by `/activate`, `/purchase/fulfill`, `/addon`, `/backfill`, `/assignments`, `/reconcile`, `/partners/directory`
 - `CRON_SECRET` — Bearer secret for `/api/licenses/send-reminders`
+- `OUTBOX_DRAIN` — `false` stops `/api/outbox/drain` (rows wait); anything else = on. `OUTBOX_DRAIN_BUDGET_MS` — claim budget per call (default 20000, 1000..40000)
+- `LICENSE_ISSUE_OUTBOX` — `off` | `shadow` (default) | `on`; `LICENSE_ISSUE_OUTBOX_CANARY` — 0..100 (default 0), the share of new licences the drain sends for when `on`
 
 ## Architecture
 
@@ -57,7 +59,7 @@ RLS policies depend on `SECURITY DEFINER` helper functions (`get_user_global_rol
 
 ### Auth & route protection
 
-`middleware.ts` runs `supabase.auth.getUser()` on every non-static request and redirects unauthenticated users to `/login`. The allowlist of public paths is hardcoded there: `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/payment`, plus these public API prefixes: `/api/health`, `/api/licenses/verify`, `/api/licenses/activate` (internal key), `/api/licenses/purchase/fulfill` (internal key), `/api/signup/*`, `/api/partners/approve`, `/api/partners/grant-access`, `/api/partners/branding/*`. **If you add a new public-facing route, also add it to the middleware allowlist** — otherwise it will redirect to `/login`.
+`middleware.ts` runs `supabase.auth.getUser()` on every non-static request and redirects unauthenticated users to `/login`. The allowlist of public paths is hardcoded there: `/login`, `/signup`, `/forgot-password`, `/reset-password`, `/payment`, plus these public API prefixes: `/api/health`, `/api/licenses/verify`, `/api/licenses/activate` (internal key), `/api/licenses/purchase/fulfill` (internal key), `/api/outbox/drain` (internal key), `/api/signup/*`, `/api/partners/approve`, `/api/partners/grant-access`, `/api/partners/branding/*`. **If you add a new public-facing route, also add it to the middleware allowlist** — otherwise it will redirect to `/login`.
 
 The Supabase docs warning in `middleware.ts` is real: don't insert logic between `createServerClient` and `getUser()`, and always return the `supabaseResponse` object so cookies stay in sync.
 
@@ -224,3 +226,39 @@ a `NEXT_PUBLIC_*` key, which shipped that key to every browser. Now:
 conditioned on `is_activated = false` so a concurrent call cannot count twice.
 The reminder cron claims each seat (compare-and-set) before sending, and first
 licence emails carry a Resend idempotency key; manual resends never do.
+
+## Licence side effects go through the outbox (2026-11-20)
+
+`/api/licenses/add` and `/add-multiple` used to insert the licence, then call
+the main API's `activate_license`, then send the Resend email, all inside the
+request: a crash after the insert left a seat with no plan in Moil and no
+email, a failed activation was swallowed and still sent the "register" email,
+and two concurrent adds could both pass the seat count. Now:
+
+- `issue_licenses` (`database/add_license_issue_outbox.sql`) re-checks seats
+  under a lock on the team row, locks each email, inserts the licences and
+  emits `license.activate` + `license.email` outbox events (ordering key
+  `license:<id>`) in ONE transaction (`lib/outbox/licenseIssue.ts`).
+- `POST /api/outbox/drain` (internal key, `lib/outbox/drain.ts`) performs them:
+  at most 20 rows a call, 5 at a time, a 20 s claim budget. The VPS cron calls
+  it every minute; the crontab line is in `EXTERNAL_API_DOCS.md` §8:
+  `* * * * * flock -n /tmp/partner-outbox-drain.lock curl -sS -m 65 -X POST -H @/etc/moil/partner-outbox.headers https://partners.moilapp.com/api/outbox/drain >> /var/log/moil/partner-outbox-drain.log 2>&1`
+  (the key lives in the chmod-600 header file, never in the line).
+- Who sends is decided ONCE per licence (`rules.decideSender`: mode + canary on
+  a hash of the licence id) and stored on the event as `payload.sender`. The
+  route activates and emails inline only for `legacy`; the drain sends only for
+  `outbox` and merely verifies `legacy` rows (shadow: the route wrote
+  `email_status`). One licence is never sent by both.
+- The email waits until the activation answer is recorded on the licence
+  (`moil_license_status`, `moil_has_account`): no email before activation
+  succeeded. Resend gets the outbox key as its idempotency key.
+- Inert until the SQL is applied: "function not found" makes the routes insert
+  inline as before and the drain answer `available: false`. Any refused
+  statement also falls back to the inline insert (nothing was written); only
+  an unknown outcome answers 500, so a licence is never inserted twice.
+- Not on the outbox (yet): `/api/licenses/import` (it activates before it
+  inserts and sends only the activation email; moving it needs a decision on
+  which email an imported person with an account gets) and the Moil-staff
+  upgrade path of `/add` (reuses the row; stays inline).
+- Ops: `select * from outbox_health();`, `outbox_replay(actor, ids)` and
+  `outbox_cancel(actor, event_type)` in the SQL editor (logged with who).
