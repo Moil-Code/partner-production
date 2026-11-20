@@ -61,6 +61,13 @@ test('claim uses SKIP LOCKED and orders by seq; issue locks the team row', () =>
   for (const t of [outboxText, issueText]) assert.match(t, /NOTIFY pgrst, 'reload schema';/);
 });
 
+test('cancel touches verify-only rows only (a relay-owned row is never cancelled)', () => {
+  const body = outboxText.slice(outboxText.indexOf('FUNCTION public.outbox_cancel('));
+  const update = body.slice(body.indexOf("SET status = 'cancelled'"), body.indexOf('GET DIAGNOSTICS'));
+  assert.ok(update.length > 0, 'found the cancel UPDATE');
+  assert.match(update, /AND payload->>'sender' = 'legacy'/);
+});
+
 // ---------- part 2: real Postgres ----------
 
 const PG = process.env.OUTBOX_TEST_PG_URL;
@@ -235,21 +242,24 @@ test('postgres', { skip }, async (t) => {
 
   await t.test('health, prune, replay and cancel', () => {
     reset();
-    for (let i = 0; i < 3; i += 1) psql(`SELECT public.outbox_emit('t.e', 'agg', '${i}', NULL, '{}', 't.e:${i}')`);
+    for (let i = 0; i < 3; i += 1) psql(`SELECT public.outbox_emit('t.e', 'agg', '${i}', NULL, '{"sender":"legacy"}', 't.e:${i}')`);
+    // Relay-owned: the route skipped its effect, so cancel must never touch it.
+    psql(`SELECT public.outbox_emit('t.e', 'agg', 'o', NULL, '{"sender":"outbox"}', 't.e:o')`);
     const [d, x] = psql(`SELECT id FROM public.outbox_claim('A', 2, 60)`).split('\n');
     psql(`SELECT public.outbox_settle('${d}', 'A', 'delivered')`);
     psql(`SELECT public.outbox_settle('${x}', 'A', 'dead', 'bad')`);
-    assert.equal(psql(`SELECT event_type || ',' || pending || ',' || dead || ',' || delivered_last_hour FROM public.outbox_health()`), 't.e,1,1,1');
+    assert.equal(psql(`SELECT event_type || ',' || pending || ',' || dead || ',' || delivered_last_hour FROM public.outbox_health()`), 't.e,2,1,1');
 
     psql(`UPDATE public.outbox_events SET delivered_at = NOW() - INTERVAL '15 days' WHERE id = '${d}'`);
     assert.equal(psql(`SELECT public.outbox_prune()`), '1');
-    assert.equal(psql(`SELECT count(*) FROM public.outbox_events`), '2', 'dead and pending rows kept');
+    assert.equal(psql(`SELECT count(*) FROM public.outbox_events`), '3', 'dead and pending rows kept');
 
     assert.throws(() => psql(`SELECT public.outbox_replay('', ARRAY['${x}']::uuid[])`), /actor is required/);
     assert.equal(psql(`SELECT public.outbox_replay('ops@moil', ARRAY['${x}']::uuid[])`), '1');
     assert.equal(psql(`SELECT status || ',' || attempts FROM public.outbox_events WHERE id = '${x}'`), 'pending,0');
     assert.equal(psql(`SELECT public.outbox_cancel('ops@moil', 't.e')`), '2');
     assert.equal(psql(`SELECT count(*) FROM public.outbox_events WHERE status = 'cancelled'`), '2');
+    assert.equal(psql(`SELECT status FROM public.outbox_events WHERE idempotency_key = 't.e:o'`), 'pending', 'relay-owned row never cancelled');
     assert.equal(psql(`SELECT string_agg(action || ':' || actor, ',' ORDER BY id) FROM public.outbox_admin_log`), 'replay:ops@moil,cancel:ops@moil');
   });
 });

@@ -712,7 +712,10 @@ select * from public.outbox_health();
 -- replay dead rows by id, or by type and window (logged with who):
 select public.outbox_replay('you@moilapp.com', array['<event id>']::uuid[]);
 select public.outbox_replay('you@moilapp.com', null, 'license.email', '2026-11-20', '2026-11-21');
--- cancel pending rows of a type (kept for audit):
+-- cancel pending VERIFY-ONLY rows of a type (sender 'legacy'; kept for audit).
+-- Rows stored with sender 'outbox' are never cancelled: the route skipped
+-- their effect, so the drain must still deliver them. A flow is rolled back by
+-- its canary (0) or mode (off); that changes new licences only.
 select public.outbox_cancel('you@moilapp.com', 'license.email');
 ```
 

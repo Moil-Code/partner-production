@@ -262,3 +262,7 @@ and two concurrent adds could both pass the seat count. Now:
   upgrade path of `/add` (reuses the row; stays inline).
 - Ops: `select * from outbox_health();`, `outbox_replay(actor, ids)` and
   `outbox_cancel(actor, event_type)` in the SQL editor (logged with who).
+  `outbox_cancel` only cancels verify-only rows (`payload.sender = 'legacy'`):
+  a row stored with sender `outbox` is delivered by the drain in every mode
+  (the route skipped its effect), so rollback (canary 0, mode off) never
+  loses an email or an activation.

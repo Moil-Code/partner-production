@@ -33,7 +33,12 @@
 --                      dead rows older than 1 year, 5000 at a time.
 --   outbox_replay      reset dead/cancelled rows to pending (never re-inserts;
 --                      the idempotency key is kept). Logged with who.
---   outbox_cancel      set pending (unleased) rows cancelled. Logged with who.
+--   outbox_cancel      set pending (unleased) VERIFY-ONLY rows cancelled
+--                      (payload.sender = 'legacy': the route already did the
+--                      effect, the drain only checks it). A row stored with
+--                      sender 'outbox' is never cancelled: the route skipped
+--                      its effect, so the drain is its only sender and
+--                      cancelling it would lose the effect. Logged with who.
 --
 -- Everything is service-role only: RLS on with no policies, and every
 -- function revoked from PUBLIC, anon and authenticated.
@@ -332,6 +337,7 @@ BEGIN
      SET status = 'cancelled'
    WHERE status = 'pending'
      AND event_type = p_event_type
+     AND payload->>'sender' = 'legacy'
      AND (locked_until IS NULL OR locked_until < NOW())
      AND (p_ids IS NULL OR id = ANY(p_ids));
   GET DIAGNOSTICS v_rows = ROW_COUNT;
