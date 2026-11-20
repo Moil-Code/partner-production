@@ -1,10 +1,23 @@
 import { NextResponse } from 'next/server';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import {
+  internalApiKey,
+  providedApiKey,
+  notConfiguredBody,
+  unauthorizedBody,
+} from '@/lib/internalApiKey';
 import { parsePlanKey, LICENSE_PLANS, BILLING_CYCLES, type LicensePlan, type BillingCycle } from '@/lib/licensePlanDefaults';
 
 /**
- * Public endpoint to activate a license
- * Called by external application (the Moil backend)
+ * Endpoint to activate a license, called by the Moil backend ONLY.
+ *
+ * AUTH: the shared internal key (`x-internal-api-key`, lib/internalApiKey.ts),
+ * failing closed like /reconcile: 503 when the key is not configured here,
+ * 401 when it is missing or wrong. A license UUID is not a capability: the ids
+ * travel in activation links, so anyone holding one could otherwise mark a
+ * seat activated and set its business name. It stays on the middleware
+ * allowlist because it carries no session.
+ *
  * Updates business_name, business_type and sets license to activated.
  *
  * Optional body fields (newer Moil backend versions send these):
@@ -14,6 +27,16 @@ import { parsePlanKey, LICENSE_PLANS, BILLING_CYCLES, type LicensePlan, type Bil
  *   - expiresAt: ISO date the granted plan expires
  */
 export async function POST(request: Request) {
+  const expectedKey = internalApiKey();
+  if (!expectedKey) {
+    console.error('[licenses/activate] no internal API key configured — refusing all requests.');
+    return NextResponse.json(notConfiguredBody('Activate endpoint'), { status: 503 });
+  }
+  const presentedKey = providedApiKey(request);
+  if (presentedKey !== expectedKey) {
+    return NextResponse.json(unauthorizedBody(expectedKey, presentedKey), { status: 401 });
+  }
+
   try {
     const {
       licenseId,
@@ -92,10 +115,21 @@ export async function POST(request: Request) {
         ...(typeof expiresAt === 'string' && expiresAt ? { expires_at: expiresAt } : {}),
       })
       .eq('id', licenseId)
+      // Only the call that flips the seat counts it: two activations of the
+      // same seat at once used to both pass the is_activated check above and
+      // both add one to the admin's active count.
+      .eq('is_activated', false)
       .select()
-      .single();
+      .maybeSingle();
 
-    if (updateError) {
+    if (!updateError && !updatedLicense) {
+      return NextResponse.json(
+        { error: 'License is already activated' },
+        { status: 400 }
+      );
+    }
+
+    if (updateError || !updatedLicense) {
       console.error('Failed to activate license:', updateError);
       return NextResponse.json(
         { error: 'Failed to activate license' },
@@ -114,25 +148,34 @@ export async function POST(request: Request) {
     const isAddon = existingLicense.grant_kind === 'addon';
     if (existingLicense.admin_id && !isAddon) {
       try {
-        const { data: adminRow, error: adminFetchError } = await supabase
-          .from('admins')
-          .select('active_purchased_license_count')
-          .eq('id', existingLicense.admin_id)
-          .single();
-
-        if (adminFetchError || !adminRow) {
-          console.error('Failed to fetch admin for count update:', adminFetchError);
-        } else {
-          const { error: adminUpdateError } = await supabase
+        // One atomic UPDATE (database/add_license_purchase_fulfillment.sql).
+        // Falls back to the old read-then-write until that SQL is applied.
+        const { error: rpcError } = await supabase.rpc(
+          'increment_admin_active_license_count',
+          { p_admin_id: existingLicense.admin_id },
+        );
+        if (rpcError) {
+          console.error('increment_admin_active_license_count failed, using fallback:', rpcError.code);
+          const { data: adminRow, error: adminFetchError } = await supabase
             .from('admins')
-            .update({
-              active_purchased_license_count:
-                (adminRow.active_purchased_license_count || 0) + 1,
-            })
-            .eq('id', existingLicense.admin_id);
+            .select('active_purchased_license_count')
+            .eq('id', existingLicense.admin_id)
+            .single();
 
-          if (adminUpdateError) {
-            console.error('Failed to update admin count:', adminUpdateError);
+          if (adminFetchError || !adminRow) {
+            console.error('Failed to fetch admin for count update:', adminFetchError);
+          } else {
+            const { error: adminUpdateError } = await supabase
+              .from('admins')
+              .update({
+                active_purchased_license_count:
+                  (adminRow.active_purchased_license_count || 0) + 1,
+              })
+              .eq('id', existingLicense.admin_id);
+
+            if (adminUpdateError) {
+              console.error('Failed to update admin count:', adminUpdateError);
+            }
           }
         }
       } catch (countError) {
