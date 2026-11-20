@@ -35,6 +35,7 @@ The actual env var names used in code differ from `env.example` (which is stale)
 - `CRON_SECRET` — Bearer secret for `/api/licenses/send-reminders`
 - `OUTBOX_DRAIN` — `false` stops `/api/outbox/drain` (rows wait); anything else = on. `OUTBOX_DRAIN_BUDGET_MS` — claim budget per call (default 20000, 1000..40000)
 - `LICENSE_ISSUE_OUTBOX` — `off` | `shadow` (default) | `on`; `LICENSE_ISSUE_OUTBOX_CANARY` — 0..100 (default 0), the share of new licences the drain sends for when `on`
+- `LICENSE_IMPORT_OUTBOX` / `LICENSE_IMPORT_OUTBOX_CANARY` — the same pair for the CSV import (default shadow / 0)
 
 ## Architecture
 
@@ -256,10 +257,22 @@ and two concurrent adds could both pass the seat count. Now:
   inline as before and the drain answer `available: false`. Any refused
   statement also falls back to the inline insert (nothing was written); only
   an unknown outcome answers 500, so a licence is never inserted twice.
-- Not on the outbox (yet): `/api/licenses/import` (it activates before it
-  inserts and sends only the activation email; moving it needs a decision on
-  which email an imported person with an account gets) and the Moil-staff
-  upgrade path of `/add` (reuses the row; stays inline).
+- `/api/licenses/import` goes through `issue_import_licenses`
+  (`database/add_license_import_outbox.sql`, `lib/outbox/licenseImport.ts`,
+  handlers `lib/outbox/licenseImportHandlers.ts`) with its own dials
+  `LICENSE_IMPORT_OUTBOX` (default shadow) / `_CANARY` (default 0). What a
+  person receives does NOT change: the activation ("register") email to every
+  licence the main API did not answer `activated` (even someone who already has
+  a Moil account; which email they should get is an open owner question), and
+  no activation without plan defaults. A 'legacy' licence is activated before
+  the insert, as before; an 'outbox' one by the drain (`license.activate`,
+  `payload.flow = 'import'`, the route's exact request), and a final
+  activation failure records `activation_failed` so the email still goes.
+  Imports over 1000 rows stay inline.
+- Not on the outbox: the Moil-staff upgrade path of `/add` (reuses the row,
+  whose `moil_license_status` and `email_status` already hold the first
+  issue's answer; the outbox gates on them, so an upgrade needs its own
+  per-upgrade record first).
 - Ops: `select * from outbox_health();`, `outbox_replay(actor, ids)` and
   `outbox_cancel(actor, event_type)` in the SQL editor (logged with who).
   `outbox_cancel` only cancels verify-only rows (`payload.sender = 'legacy'`):

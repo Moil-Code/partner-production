@@ -16,6 +16,7 @@ import {
   type EdcEmailInfo,
 } from '@/lib/email';
 import type { Issuer, LicenseDeps, LicenseRow } from './licenseHandlers.ts';
+import type { ImportIssuer, LicenseImportDeps } from './licenseImportHandlers.ts';
 
 const ACTIVATE_TIMEOUT_MS = 10_000;
 
@@ -142,5 +143,77 @@ export function licenseDeps(admin: SupabaseClient): LicenseDeps {
 
     appUrl: process.env.NEXT_PUBLIC_APP_URL || 'https://business.moilapp.com',
     now: () => new Date().toISOString(),
+  };
+}
+
+/**
+ * Dependencies of the CSV import's handlers (lib/outbox/licenseImportHandlers.ts).
+ * The issuer is built exactly as /api/licenses/import builds it: the admin's
+ * name as `${first_name} ${last_name}`, partner branding only when the admin
+ * has a partner (otherwise undefined, and the email resolves the branding from
+ * the admin's email, as the import's batch send does), and the same template
+ * (sendLicenseActivationEmail and the batch send render LicenseActivationEmail
+ * with the same subject and branding rule).
+ */
+export function licenseImportDeps(admin: SupabaseClient): LicenseImportDeps {
+  const base = licenseDeps(admin);
+  return {
+    getLicense: base.getLicense,
+    updateLicense: base.updateLicense,
+    markActivated: base.markActivated,
+    callActivate: base.callActivate,
+    appUrl: base.appUrl,
+    now: base.now,
+
+    async getImportIssuer(adminId): Promise<ImportIssuer> {
+      if (!adminId) return { orgSlug: 'moil-partners', adminName: 'undefined undefined', adminEmail: undefined, edc: undefined };
+      const { data, error } = await admin
+        .from('admins')
+        .select('first_name, last_name, email, partner:partners(id, name, program_name, logo_url, logo_initial, primary_color, support_email)')
+        .eq('id', adminId)
+        .maybeSingle();
+      if (error) throw new Error(`issuer read failed (${error.code ?? 'unknown'})`);
+      const row = data as unknown as {
+        first_name?: string | null;
+        last_name?: string | null;
+        email?: string | null;
+        partner?: PartnerRow;
+      } | null;
+      const partner = row?.partner ?? null;
+      const edc: EdcEmailInfo | undefined = partner
+        ? {
+            programName: partner.program_name || partner.name || 'Moil Partners',
+            fullName: partner.name || 'Moil Partners',
+            logo: partner.logo_url || undefined,
+            logoInitial: partner.logo_initial || partner.name?.charAt(0) || 'M',
+            primaryColor: partner.primary_color || '#5843BE',
+            supportEmail: partner.support_email || 'support@moilapp.com',
+            licenseDuration: '12 months',
+          }
+        : undefined;
+      return {
+        orgSlug: (partner?.name || 'moil-partners').replace(/\s+/g, '-'),
+        adminName: `${row?.first_name} ${row?.last_name}`,
+        adminEmail: row?.email ?? undefined,
+        edc,
+      };
+    },
+
+    async sendImportEmail(a) {
+      return sendLicenseActivationEmail({
+        email: a.email,
+        activationUrl: a.activationUrl,
+        adminName: a.adminName,
+        adminEmail: a.adminEmail,
+        edc: a.edc as EdcEmailInfo | undefined,
+        idempotencyKey: a.idempotencyKey,
+      });
+    },
+
+    async recordEmail(s) {
+      await recordLicenseEmails(admin, [
+        { messageId: s.messageId, licenseId: s.licenseId, kind: s.kind, recipient: s.recipient },
+      ]);
+    },
   };
 }

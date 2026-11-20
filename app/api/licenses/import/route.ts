@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { randomUUID } from 'crypto';
 import { moilApiUrl, moilPartnerApiKey } from '@/lib/moilApi';
 import { createClient, createAdminClient } from '@/lib/supabase/server';
 import { recordLicenseEmails } from '@/lib/licenseEmailLog';
@@ -8,6 +9,12 @@ import {
   type LicensePlanDefaults,
 } from '@/lib/licensePlanDefaults';
 import { resolveIssuablePlan } from '@/lib/licenseIssuePolicy';
+import {
+  importRpcRows,
+  issueImportLicensesViaOutbox,
+  licenseImportConfig,
+  planImport,
+} from '@/lib/outbox/licenseImport';
 
 export async function POST(request: Request) {
   try {
@@ -176,6 +183,14 @@ export async function POST(request: Request) {
       .filter(check => check.exists)
       .map(check => check.email);
 
+    // Who activates and emails each licence: this request ('legacy') or the
+    // outbox drain ('outbox'). Decided once per licence, stored on its outbox
+    // events, and read here, so the two never both send
+    // (lib/outbox/licenseImport.ts). Mode 'off', or an import too large for
+    // one transaction: every licence is 'legacy' and nothing below changes.
+    const importPlan = planImport(newEmails, licenseImportConfig(), randomUUID);
+    const legacyEmails = importPlan.items.filter((i) => i.sender === 'legacy').map((i) => i.email);
+
     // External activate_license call — ONLY when the caller provides plan
     // defaults. Partner CSV import doesn't, so this whole block is skipped
     // and we never communicate with the external endpoint.
@@ -205,18 +220,24 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: planParse.error }, { status: planParse.status });
       }
       planDefaults = planParse.defaults;
+    }
 
+    // The inline activation (sender 'legacy' only; the drain activates the
+    // 'outbox' ones). With every licence 'legacy' this is the one call the
+    // route always made, with the same body.
+    const activateInline = async (emails: string[]) => {
+      if (!planDefaults) return;
       try {
         const moilKey = moilPartnerApiKey();
         const moilUrl = moilApiUrl();
-        if (moilKey && moilUrl && newEmails.length > 0) {
+        if (moilKey && moilUrl && emails.length > 0) {
           const externalResponse = await fetch(`${moilUrl}/api/employer/activate_license`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'x-api-key': moilKey,
             },
-            body: JSON.stringify({ emails: newEmails, defaults: planDefaults }),
+            body: JSON.stringify({ emails, defaults: planDefaults }),
           });
 
           if (externalResponse.ok) {
@@ -238,10 +259,11 @@ export async function POST(request: Request) {
         console.error('Error checking external license status:', externalError);
         // Continue with normal flow if external check fails
       }
-    }
+    };
+    await activateInline(legacyEmails);
 
     // Insert all new licenses in batch
-    const licensesToInsert = newEmails.map(email => {
+    const licenseFor = (email: string) => {
       const moil = moilResultByEmail.get(email.toLowerCase());
       const resolvedPlan = parsePlanKey(moil?.plan);
       return {
@@ -261,23 +283,84 @@ export async function POST(request: Request) {
         moil_user_id: moil?.moil_user_id ?? null,
         expires_at: moil?.expiresAt ?? null,
       };
-    });
+    };
 
-    const { data: insertedLicenses, error: insertError } = await supabase
-      .from('licenses')
-      .insert(licensesToInsert)
-      .select();
+    let insertedLicenses: Array<{ id: string; email: string }> | null = null;
+    // Licence ids the drain sends for (sender 'outbox'): the route neither
+    // emails them nor writes their email_status.
+    const outboxIds = new Set<string>();
 
-    if (insertError) {
-      console.error('Batch insert error:', insertError);
-      return NextResponse.json(
-        { error: `Failed to insert licenses: ${insertError.message}` },
-        { status: 500 }
-      );
+    if (importPlan.useRpc && newEmails.length > 0) {
+      // One transaction: seats re-checked under the team lock, licences
+      // inserted, their outbox events emitted.
+      const rows = importRpcRows(importPlan.items, planDefaults, (email) => {
+        const l = licenseFor(email);
+        return {
+          isActivated: l.is_activated,
+          // The same test the email batch below applies.
+          expectsEmail: !emailsToSkipActivation.has(l.email),
+          planTier: l.plan_tier,
+          billingCycle: l.billing_cycle,
+          moilUserId: l.moil_user_id,
+          expiresAt: l.expires_at,
+        };
+      });
+      const r = await issueImportLicensesViaOutbox(adminSupabase, {
+        adminId: user.id,
+        teamId: teamId || null,
+        partnerId: (admin.partner as { id?: string } | null)?.id ?? null,
+        rows,
+      });
+      if (r.status === 'ok') {
+        insertedLicenses = r.licenses;
+        for (const item of importPlan.items) if (item.sender === 'outbox') outboxIds.add(item.id);
+      } else if (r.status === 'no_seats') {
+        return NextResponse.json({
+          error: `Only ${r.available} license(s) available. You're trying to import ${dataLines.length}.`
+        }, { status: 400 });
+      } else if (r.status === 'exists') {
+        // Lost a race with another add or import for the same email.
+        return NextResponse.json(
+          {
+            error: `The following email(s) already have licenses allocated: ${r.emails.join(', ')}. If this is a mistake, please contact cs@moilapp.com`,
+            emailsWithLicenses: r.emails,
+          },
+          { status: 400 }
+        );
+      } else if (r.status === 'error') {
+        return NextResponse.json(
+          { error: 'Failed to insert licenses: the outcome is unknown, check the license list before retrying' },
+          { status: 500 }
+        );
+      } else {
+        // 'unavailable' (migration not applied) or 'rpc_failed' (nothing was
+        // written): every licence goes inline below, as before. The ones meant
+        // for the drain have not been activated yet.
+        await activateInline(importPlan.items.filter((i) => i.sender === 'outbox').map((i) => i.email));
+      }
     }
 
+    if (!insertedLicenses) {
+      const { data: created, error: insertError } = await supabase
+        .from('licenses')
+        .insert(newEmails.map(licenseFor))
+        .select();
+
+      if (insertError) {
+        console.error('Batch insert error:', insertError);
+        return NextResponse.json(
+          { error: `Failed to insert licenses: ${insertError.message}` },
+          { status: 500 }
+        );
+      }
+      insertedLicenses = created;
+    }
+
+    // The licences this request emails (all of them unless the drain owns some).
+    const legacyLicenses = (insertedLicenses || []).filter((license) => !outboxIds.has(license.id));
+
     // Prepare batch email data with dynamic partner org name, excluding already-activated licenses
-    const emailBatch = (insertedLicenses || [])
+    const emailBatch = legacyLicenses
       .filter(license => !emailsToSkipActivation.has(license.email))
       .map(license => ({
         email: license.email,
@@ -323,10 +406,10 @@ export async function POST(request: Request) {
           }
         })
       );
-    } else if (insertedLicenses && insertedLicenses.length > 0) {
+    } else if (legacyLicenses.length > 0) {
       // If no results returned, mark all inserted licenses as failed
       await Promise.all(
-        insertedLicenses.map(async (license) => {
+        legacyLicenses.map(async (license) => {
           await supabase
             .from('licenses')
             .update({

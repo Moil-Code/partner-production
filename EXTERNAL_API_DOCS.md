@@ -667,6 +667,19 @@ key `license:<id>`, and the email waits until an answer is recorded, so no
 email goes out before the activation succeeded. Events whose payload says
 `sender: "legacy"` are only checked (the route sent inline; shadow mode).
 
+CSV import (`/api/licenses/import`, `issue_import_licenses`): the same
+`license.activate` event with `payload.flow = "import"` (emitted only when the
+import carries plan defaults; it sends exactly the route's request,
+`{ emails: [email], defaults }`) and `license.import_email`, which sends the
+activation ("register") email unless the main API answered `activated`, as
+the route does. A final activation failure (non-retryable answer, the 10th
+attempt, or no main API) records `moil_license_status = 'activation_failed'`
+and the email still goes, as it does today. Dials: `LICENSE_IMPORT_OUTBOX`
+(`off` | `shadow`, default | `on`) and `LICENSE_IMPORT_OUTBOX_CANARY` (0..100,
+default 0). An import over 1000 rows stays inline. Throughput: 20 events per
+call, one call a minute, so an import of N seats takes about N/20 minutes
+without plan defaults (one event a seat) and N/10 with them (two).
+
 ### Response (200)
 
 ```json

@@ -28,7 +28,7 @@ export const LICENSE_ISSUE_CANARY_ENV = 'LICENSE_ISSUE_OUTBOX_CANARY';
 const DEFAULT_MODE: FlowMode = 'shadow';
 
 let warnedMode = false;
-let warnedMissing = false;
+const warnedMissing = new Set<string>();
 
 export function licenseIssueConfig(env: Record<string, string | undefined> = process.env): {
   mode: FlowMode;
@@ -72,27 +72,40 @@ export async function issueLicensesViaOutbox(
   admin: SupabaseClient,
   args: { adminId: string; teamId: string | null; partnerId: string | null; rows: IssueRow[] },
 ): Promise<IssueResult> {
+  return callIssueRpc(admin, 'issue_licenses', args, 'database/add_license_issue_outbox.sql');
+}
+
+/**
+ * Call an issue RPC (issue_licenses, issue_import_licenses) and read its
+ * answer. Shared so both flows classify a failure the same way.
+ */
+export async function callIssueRpc(
+  admin: SupabaseClient,
+  fn: string,
+  args: { adminId: string; teamId: string | null; partnerId: string | null; rows: unknown[] },
+  migrationFile: string,
+): Promise<IssueResult> {
   let data: unknown;
   let error: { code?: string; message?: string } | null;
   try {
-    ({ data, error } = await admin.rpc('issue_licenses', {
+    ({ data, error } = await admin.rpc(fn, {
       p_admin_id: args.adminId,
       p_team_id: args.teamId,
       p_partner_id: args.partnerId,
       p_rows: args.rows,
     }));
   } catch (err) {
-    console.error('[outbox] issue_licenses threw:', err instanceof Error ? err.message : 'unknown');
+    console.error(`[outbox] ${fn} threw:`, err instanceof Error ? err.message : 'unknown');
     return { status: 'error' };
   }
 
   if (error) {
     if (isMissingObject(error)) {
-      if (!warnedMissing) {
-        warnedMissing = true;
+      if (!warnedMissing.has(fn)) {
+        warnedMissing.add(fn);
         console.warn(
-          `[outbox] issue_licenses not installed (code ${error.code}); the add routes ` +
-            'insert inline as before. Apply database/add_outbox.sql then database/add_license_issue_outbox.sql.',
+          `[outbox] ${fn} not installed (code ${error.code}); the route ` +
+            `inserts inline as before. Apply database/add_outbox.sql then ${migrationFile}.`,
         );
       }
       return { status: 'unavailable' };
@@ -103,10 +116,10 @@ export async function issueLicensesViaOutbox(
     // have committed: answer 500 rather than risk a second licence.
     const code = String(error.code ?? '');
     if (/^[0-9A-Z]{5}$/.test(code) || code.startsWith('PGRST')) {
-      console.error(`[outbox] issue_licenses failed (${code}); inserting inline`);
+      console.error(`[outbox] ${fn} failed (${code}); inserting inline`);
       return { status: 'rpc_failed' };
     }
-    console.error('[outbox] issue_licenses outcome unknown (no SQLSTATE)');
+    console.error(`[outbox] ${fn} outcome unknown (no SQLSTATE)`);
     return { status: 'error' };
   }
 
@@ -119,6 +132,6 @@ export async function issueLicensesViaOutbox(
   if (r.status === 'ok' && Array.isArray(r.licenses)) return { status: 'ok', licenses: r.licenses };
   if (r.status === 'no_seats') return { status: 'no_seats', available: Number(r.available) || 0 };
   if (r.status === 'exists') return { status: 'exists', emails: Array.isArray(r.emails) ? r.emails : [] };
-  console.error('[outbox] issue_licenses answered an unknown shape');
+  console.error(`[outbox] ${fn} answered an unknown shape`);
   return { status: 'error' };
 }

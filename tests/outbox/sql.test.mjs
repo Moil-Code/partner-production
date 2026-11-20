@@ -18,10 +18,12 @@ import path from 'node:path';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const OUTBOX_SQL = path.join(root, 'database/add_outbox.sql');
 const ISSUE_SQL = path.join(root, 'database/add_license_issue_outbox.sql');
+const IMPORT_SQL = path.join(root, 'database/add_license_import_outbox.sql');
 // Comments stripped, so a rule mentioned in a comment cannot satisfy a check.
 const stripComments = (sql) => sql.replace(/--[^\n]*/g, '');
 const outboxText = stripComments(readFileSync(OUTBOX_SQL, 'utf8'));
 const issueText = stripComments(readFileSync(ISSUE_SQL, 'utf8'));
+const importText = stripComments(readFileSync(IMPORT_SQL, 'utf8'));
 
 // ---------- part 1: text ----------
 
@@ -30,7 +32,7 @@ function functionsIn(text) {
 }
 
 test('every function is SECURITY DEFINER and revoked from PUBLIC, anon, authenticated', () => {
-  for (const text of [outboxText, issueText]) {
+  for (const text of [outboxText, issueText, importText]) {
     const fns = functionsIn(text);
     assert.ok(fns.length > 0);
     for (const fn of fns) {
@@ -48,7 +50,7 @@ test('tables are RLS-on with no policies and closed to anon/authenticated', () =
     assert.match(outboxText, new RegExp(`ALTER TABLE public\\.${t} ENABLE ROW LEVEL SECURITY;`));
     assert.match(outboxText, new RegExp(`REVOKE ALL ON public\\.${t} FROM PUBLIC, anon, authenticated;`));
   }
-  assert.doesNotMatch(outboxText + issueText, /CREATE POLICY/);
+  assert.doesNotMatch(outboxText + issueText + importText, /CREATE POLICY/);
 });
 
 test('claim uses SKIP LOCKED and orders by seq; issue locks the team row', () => {
@@ -59,6 +61,17 @@ test('claim uses SKIP LOCKED and orders by seq; issue locks the team row', () =>
   assert.match(issueText, /'license\.email:' \|\| v_id::TEXT/);
   assert.equal((issueText.match(/'license:' \|\| v_id::TEXT/g) || []).length, 2);
   for (const t of [outboxText, issueText]) assert.match(t, /NOTIFY pgrst, 'reload schema';/);
+});
+
+test('import: team lock, same email lock as /add, import-specific email event, one ordering key', () => {
+  assert.match(importText, /FROM public\.teams WHERE id = p_team_id\s+FOR UPDATE;/);
+  assert.match(importText, /hashtextextended\('license-email:' \|\| v_email, 0\)/);
+  assert.match(issueText, /hashtextextended\('license-email:' \|\| v_email, 0\)/);
+  assert.match(importText, /'license\.import_email:' \|\| v_id::TEXT/);
+  assert.match(importText, /'license\.activate:' \|\| v_id::TEXT/);
+  assert.match(importText, /'flow', 'import'/);
+  assert.equal((importText.match(/'license:' \|\| v_id::TEXT/g) || []).length, 2);
+  assert.match(importText, /NOTIFY pgrst, 'reload schema';/);
 });
 
 test('cancel touches verify-only rows only (a relay-owned row is never cancelled)', () => {
@@ -120,6 +133,13 @@ const uuid = () => `00000000-0000-4000-8000-${String((n += 1)).padStart(12, '0')
 const issue = (rows, team = TEAM) =>
   JSON.parse(psql(`SELECT public.issue_licenses('${ADMIN}', ${team ? `'${team}'` : 'NULL'}, NULL, '${JSON.stringify(rows)}'::jsonb)`));
 const row = (email, sender = 'outbox') => ({ id: uuid(), email, plan_tier: 'standard', billing_cycle: 'yearly', months: null, sender });
+const importIssue = (rows, team = TEAM) =>
+  JSON.parse(psql(`SELECT public.issue_import_licenses('${ADMIN}', ${team ? `'${team}'` : 'NULL'}, NULL, '${JSON.stringify(rows)}'::jsonb)`));
+const importRow = (email, { sender = 'outbox', needs = false, expects = true, ...extra } = {}) => ({
+  id: uuid(), email, sender, needs_activation: needs, expects_email: expects,
+  is_activated: false, plan_tier: needs ? 'standard' : null, billing_cycle: needs ? 'yearly' : null, months: null,
+  moil_user_id: null, expires_at: null, ...extra,
+});
 const reset = () => psql('TRUNCATE public.outbox_events, public.licenses, public.outbox_admin_log; DELETE FROM public.teams;');
 
 test('postgres', { skip }, async (t) => {
@@ -128,12 +148,14 @@ test('postgres', { skip }, async (t) => {
   for (let i = 0; i < 2; i += 1) {
     psqlFile(OUTBOX_SQL);
     psqlFile(ISSUE_SQL);
+    psqlFile(IMPORT_SQL);
   }
 
   await t.test('only service_role may call the functions', () => {
     for (const role of ['anon', 'authenticated']) {
       assert.throws(() => psql(`SELECT * FROM public.outbox_claim('x', 1, 60)`, { role }), /permission denied/);
       assert.throws(() => psql(`SELECT public.issue_licenses(NULL, NULL, NULL, '[]')`, { role }), /permission denied/);
+      assert.throws(() => psql(`SELECT public.issue_import_licenses(NULL, NULL, NULL, '[]')`, { role }), /permission denied/);
       assert.throws(() => psql(`SELECT count(*) FROM public.outbox_events`, { role }), /permission denied/);
     }
     assert.equal(psql(`SELECT count(*) FROM public.outbox_claim('x', 1, 60)`, { role: 'service_role' }), '0');
@@ -234,6 +256,51 @@ test('postgres', { skip }, async (t) => {
     const a = psqlAsync(`BEGIN; ${call('one@x.co')}; SELECT pg_sleep(1); COMMIT;`);
     await sleep(300);
     const b = JSON.parse(psql(call('two@x.co')));
+    const aOut = JSON.parse((await a).split('\n').find((l) => l.startsWith('{')));
+    assert.equal(aOut.status, 'ok');
+    assert.deepEqual(b, { status: 'no_seats', available: 0 });
+    assert.equal(psql(`SELECT count(*) FROM public.licenses`), '1');
+  });
+
+  await t.test('issue_import_licenses: no plan = only the import email; plan = activate (flow import) then email', () => {
+    reset();
+    psql(`INSERT INTO public.teams VALUES ('${TEAM}', 5)`);
+    const noPlan = importRow('P@Example.com');
+    const withPlan = importRow('q@example.com', { needs: true });
+    const legacy = importRow('r@example.com', { sender: 'legacy', needs: true, expects: false, is_activated: true, plan_tier: 'market_pro', moil_user_id: 'u1', expires_at: '2027-01-01T00:00:00Z' });
+    const r = importIssue([noPlan, withPlan, legacy]);
+    assert.equal(r.status, 'ok');
+    assert.equal(r.licenses[0].email, 'p@example.com');
+    assert.equal(psql(`SELECT event_type FROM public.outbox_events WHERE aggregate_id = '${noPlan.id}'`), 'license.import_email');
+    assert.equal(psql(`SELECT string_agg(event_type, ',' ORDER BY seq) FROM public.outbox_events WHERE aggregate_id = '${withPlan.id}'`), 'license.activate,license.import_email');
+    assert.equal(psql(`SELECT payload->>'flow' FROM public.outbox_events WHERE aggregate_id = '${withPlan.id}' AND event_type = 'license.activate'`), 'import');
+    assert.equal(psql(`SELECT count(*) FROM public.outbox_events WHERE payload::text LIKE '%@%'`), '0', 'no address in a payload');
+    assert.equal(psql(`SELECT is_activated || ',' || plan_tier || ',' || moil_user_id || ',' || (expires_at IS NOT NULL) FROM public.licenses WHERE id = '${legacy.id}'`), 'true,market_pro,u1,true');
+    assert.equal(psql(`SELECT payload->>'expects_email' FROM public.outbox_events WHERE aggregate_id = '${legacy.id}' AND event_type = 'license.import_email'`), 'false');
+    // The import email waits for its activation (ordering key).
+    const first = psql(`SELECT aggregate_id || ':' || event_type FROM public.outbox_claim('A', 10, 60) ORDER BY 1`).split('\n');
+    assert.ok(!first.includes(`${withPlan.id}:license.import_email`));
+    assert.ok(first.includes(`${noPlan.id}:license.import_email`));
+  });
+
+  await t.test('issue_import_licenses: seats, duplicates, malformed rows', () => {
+    reset();
+    psql(`INSERT INTO public.teams VALUES ('${TEAM}', 2)`);
+    assert.deepEqual(importIssue([importRow('a@x.co'), importRow('b@x.co'), importRow('c@x.co')]), { status: 'no_seats', available: 2 });
+    assert.equal(issue([row('a@x.co')]).status, 'ok');
+    assert.deepEqual(importIssue([importRow('A@x.co')]), { status: 'exists', emails: ['a@x.co'] });
+    assert.equal(psql(`SELECT count(*) FROM public.licenses`), '1', 'a refused import inserts nothing');
+    assert.throws(() => importIssue([{ ...importRow('d@x.co'), needs_activation: 'yes' }]), /malformed row/);
+    assert.throws(() => importIssue([importRow('d@x.co', { is_activated: true })]), /malformed row/, 'an outbox row is never pre-activated');
+  });
+
+  await t.test('an import and an /add for the last seat -> exactly one wins (one team lock)', async () => {
+    reset();
+    psql(`INSERT INTO public.teams VALUES ('${TEAM}', 1)`);
+    const imp = `SELECT public.issue_import_licenses('${ADMIN}', '${TEAM}', NULL, '${JSON.stringify([importRow('one@x.co')])}'::jsonb)`;
+    const a = psqlAsync(`BEGIN; ${imp}; SELECT pg_sleep(1); COMMIT;`);
+    await sleep(300);
+    const b = issue([row('two@x.co')]);
     const aOut = JSON.parse((await a).split('\n').find((l) => l.startsWith('{')));
     assert.equal(aOut.status, 'ok');
     assert.deepEqual(b, { status: 'no_seats', available: 0 });

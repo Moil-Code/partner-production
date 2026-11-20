@@ -10,7 +10,8 @@ import {
 import { drainOnce } from '@/lib/outbox/drain';
 import { supabaseOutboxStore } from '@/lib/outbox/store';
 import { makeLicenseHandlers } from '@/lib/outbox/licenseHandlers';
-import { licenseDeps } from '@/lib/outbox/licenseDeps';
+import { licenseDeps, licenseImportDeps } from '@/lib/outbox/licenseDeps';
+import { withImportHandlers } from '@/lib/outbox/licenseImportHandlers';
 import {
   DRAIN_BATCH_MAX,
   DRAIN_CHUNK,
@@ -76,7 +77,7 @@ export async function POST(request: Request) {
   }
 
   const store = supabaseOutboxStore(admin);
-  const handlers = makeLicenseHandlers(licenseDeps(admin));
+  const handlers = withImportHandlers(makeLicenseHandlers(licenseDeps(admin)), licenseImportDeps(admin));
   const relayId = `partner-drain:${randomUUID()}`;
 
   const counts = await drainOnce(store, handlers, {
